@@ -16,6 +16,7 @@ import bisect
 import contextlib
 import collections
 import json
+import importlib
 import logging
 import os
 import signal
@@ -167,6 +168,7 @@ class BotConfig:
     # optional Telegram notifications
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    telegram_whitelist_chat_id: str = os.getenv("TELEGRAM_WHITELIST_CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", ""))
 
 
 class SharedPaperPortfolio:
@@ -275,6 +277,7 @@ class GridBot:
         self._api_latency_observation_sum_ms = 0.0
         self._api_health_samples: collections.deque[Tuple[float, float, bool]] = collections.deque()
         self._api_safe_mode = False
+        self._paused = False
         self._api_recovery_healthy_minutes = 0
         self._last_api_health_report = {
             "sample_count": 0,
@@ -332,10 +335,11 @@ class GridBot:
                     self.loop_count += 1
                     self.last_price = current_price
                     self.last_trend_bias = trend_bias
-                await asyncio.to_thread(self._maybe_roll_grid, current_price)
-                await asyncio.to_thread(self._process_open_orders, current_price, trend_bias)
-                await asyncio.to_thread(self._save_orders)
-                await asyncio.to_thread(self._record_daily_stats_snapshot, current_price)
+                if not self._paused:
+                    await asyncio.to_thread(self._maybe_roll_grid, current_price)
+                    await asyncio.to_thread(self._process_open_orders, current_price, trend_bias)
+                    await asyncio.to_thread(self._save_orders)
+                    await asyncio.to_thread(self._record_daily_stats_snapshot, current_price)
             except Exception as exc:
                 logging.exception("Market loop error: %s", exc)
             if self._running:
@@ -1109,6 +1113,13 @@ class GridBot:
     def stop(self) -> None:
         self._running = False
 
+    def pause_trading(self) -> None:
+        self._paused = True
+        self._add_event("Trading paused by Telegram command")
+
+    def is_paused(self) -> bool:
+        return self._paused
+
     def _apply_fill_to_paper_balances(self, side: str, base_size: Decimal, price: Decimal) -> None:
         if not self.config.paper_trading_mode:
             return
@@ -1334,6 +1345,7 @@ class GridBot:
                 "daily_pnl_per_1k": str(pnl_per_1k),
                 "daily_turnover_ratio": str(turnover_ratio),
                 "api_safe_mode": self._api_safe_mode,
+                "paused": self._paused,
                 "api_health": dict(self._last_api_health_report),
                 "risk_metrics": risk,
                 "portfolio_beta": str(portfolio_beta),
@@ -2235,6 +2247,11 @@ class GridManager:
         self.engines: List[GridBot] = []
         self._shared_risk_state = SharedRiskState()
         self._risk_task: Optional[asyncio.Task[Any]] = None
+        self._telegram_thread: Optional[threading.Thread] = None
+        self._telegram_stop = threading.Event()
+        self._telegram_ready = threading.Event()
+        self._telegram_application_builder: Optional[Any] = None
+        self._telegram_command_handler_cls: Optional[Any] = None
 
     def _product_ids(self) -> List[str]:
         raw = self.config.product_ids or self.config.product_id
@@ -2378,8 +2395,13 @@ class GridManager:
                 )
             )
 
+        self._start_telegram_controller()
+
         if len(self.engines) == 1:
-            await self.engines[0].run()
+            try:
+                await self.engines[0].run()
+            finally:
+                self._stop_telegram_controller()
             return
 
         names = ", ".join(e.config.product_id for e in self.engines)
@@ -2388,14 +2410,151 @@ class GridManager:
         try:
             await asyncio.gather(*(engine.run() for engine in self.engines))
         finally:
+            self._stop_telegram_controller()
             if self._risk_task is not None:
                 self._risk_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._risk_task
 
     def stop(self) -> None:
+        self._stop_telegram_controller()
         for engine in self.engines:
             engine.stop()
+
+    def _find_engine(self, product_id: str) -> Optional[GridBot]:
+        wanted = product_id.strip().upper()
+        for engine in self.engines:
+            if engine.config.product_id.upper() == wanted:
+                return engine
+        return None
+
+    def _start_telegram_controller(self) -> None:
+        if self._telegram_thread is not None:
+            return
+        if not self.config.telegram_bot_token.strip():
+            return
+        try:
+            telegram_ext = importlib.import_module("telegram.ext")
+            self._telegram_application_builder = telegram_ext.Application.builder
+            self._telegram_command_handler_cls = telegram_ext.CommandHandler
+        except Exception:
+            logging.warning("TELEGRAM_BOT_TOKEN set but python-telegram-bot is unavailable; Telegram commands disabled.")
+            return
+        self._telegram_stop.clear()
+        self._telegram_ready.clear()
+        self._telegram_thread = threading.Thread(target=self._telegram_thread_main, name="telegram-command-loop", daemon=True)
+        self._telegram_thread.start()
+        self._telegram_ready.wait(timeout=5)
+
+    def _stop_telegram_controller(self) -> None:
+        self._telegram_stop.set()
+        if self._telegram_thread is not None:
+            self._telegram_thread.join(timeout=10)
+            self._telegram_thread = None
+
+    def _telegram_thread_main(self) -> None:
+        try:
+            asyncio.run(self._run_telegram_controller())
+        except Exception as exc:
+            logging.warning("Telegram controller stopped: %s", exc)
+
+    async def _run_telegram_controller(self) -> None:
+        app = self._telegram_application_builder().token(self.config.telegram_bot_token.strip()).build()
+        app.add_handler(self._telegram_command_handler_cls("pause", self._telegram_pause))
+        app.add_handler(self._telegram_command_handler_cls("set_risk", self._telegram_set_risk))
+        app.add_handler(self._telegram_command_handler_cls("report", self._telegram_report))
+        await app.initialize()
+        await app.start()
+        if app.updater is None:
+            raise RuntimeError("Telegram updater unavailable")
+        await app.updater.start_polling(drop_pending_updates=True)
+        self._telegram_ready.set()
+        try:
+            while not self._telegram_stop.is_set() and any(engine._running for engine in self.engines):
+                await asyncio.sleep(1)
+        finally:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+
+    def _is_whitelisted_chat(self, update: Any) -> bool:
+        allowed = self.config.telegram_whitelist_chat_id.strip()
+        chat_id = ""
+        if getattr(update, "effective_chat", None) is not None:
+            chat_id = str(getattr(update.effective_chat, "id", ""))
+        if not allowed:
+            logging.warning("Telegram command received but TELEGRAM_WHITELIST_CHAT_ID is empty; rejecting command.")
+            return False
+        return chat_id == allowed
+
+    async def _telegram_pause(self, update: Any, context: Any) -> None:
+        if not self._is_whitelisted_chat(update):
+            await update.effective_message.reply_text("Unauthorized chat.")
+            return
+        if not self.engines:
+            await update.effective_message.reply_text("No active engines.")
+            return
+        target = (context.args[0] if context.args else "").strip().upper()
+        if not target and len(self.engines) == 1:
+            target = self.engines[0].config.product_id
+        if not target:
+            await update.effective_message.reply_text("Usage: /pause <PRODUCT_ID>")
+            return
+        engine = self._find_engine(target)
+        if engine is None:
+            await update.effective_message.reply_text(f"Unknown product_id: {target}")
+            return
+        engine.pause_trading()
+        await update.effective_message.reply_text(f"Paused trading for {engine.config.product_id}.")
+
+    async def _telegram_set_risk(self, update: Any, context: Any) -> None:
+        if not self._is_whitelisted_chat(update):
+            await update.effective_message.reply_text("Unauthorized chat.")
+            return
+        if not context.args:
+            await update.effective_message.reply_text("Usage: /set_risk <0.0-1.0>")
+            return
+        try:
+            new_cap = Decimal(str(context.args[0]))
+        except Exception:
+            await update.effective_message.reply_text("Invalid number. Usage: /set_risk <0.0-1.0>")
+            return
+        if not (Decimal("0") <= new_cap <= Decimal("1")):
+            await update.effective_message.reply_text("Risk cap must be within [0.0, 1.0].")
+            return
+
+        for engine in self.engines:
+            with engine._state_lock:
+                engine.config.max_btc_inventory_pct = new_cap
+                engine._active_inventory_cap_pct = new_cap
+                engine._add_event(f"Inventory cap updated via Telegram: {new_cap}")
+            self._shared_risk_state.set_inventory_cap(engine.config.product_id, new_cap)
+        await update.effective_message.reply_text(
+            f"Updated max inventory cap to {new_cap} across {len(self.engines)} engine(s)."
+        )
+
+    async def _telegram_report(self, update: Any, _context: Any) -> None:
+        if not self._is_whitelisted_chat(update):
+            await update.effective_message.reply_text("Unauthorized chat.")
+            return
+        if not self.engines:
+            await update.effective_message.reply_text("No active engines.")
+            return
+        lines = []
+        for engine in self.engines:
+            snapshot = engine._status_snapshot()
+            risk = snapshot.get("risk_metrics", {})
+            lines.append(
+                "\n".join(
+                    [
+                        f"{snapshot.get('product_id')}:",
+                        f"  realized_pnl_total_usd={snapshot.get('realized_pnl_total_usd')}",
+                        f"  var_95_24h_pct={risk.get('var_95_24h_pct', '0')}",
+                        f"  paused={snapshot.get('paused')}",
+                    ]
+                )
+            )
+        await update.effective_message.reply_text("\n\n".join(lines))
 
 
 def build_client() -> Any:

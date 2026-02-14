@@ -80,4 +80,5 @@ CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"env": "API_RECOVERY_CONSECUTIVE_MINUTES", "attr": "api_recovery_consecutive_minutes", "type": "int"},
     {"env": "TELEGRAM_BOT_TOKEN", "attr": "telegram_bot_token", "type": "str"},
     {"env": "TELEGRAM_CHAT_ID", "attr": "telegram_chat_id", "type": "str"},
+    {"env": "TELEGRAM_WHITELIST_CHAT_ID", "attr": "telegram_whitelist_chat_id", "type": "str"},
 ]
