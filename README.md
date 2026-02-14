@@ -190,6 +190,43 @@ The dashboard now exposes configuration on a dedicated page at `/config` (and a 
 Use `PAPER_TRADING_MODE=true` for a live-data dry run without sending exchange orders.
 
 
+
+## Native backtesting (historical replay)
+
+Use `backtest.py` to replay historical 1-minute candles through the existing grid logic in paper mode.
+It swaps the live Coinbase REST client for a mock client backed by your CSV data.
+
+Expected CSV header columns (case-insensitive):
+
+- `timestamp` (or `ts` / `time`)
+- `open`
+- `high`
+- `low`
+- `close`
+- `volume`
+
+Run a single scenario:
+
+```bash
+python backtest.py \
+  --csv data/btc_usd_1m.csv \
+  --product-id BTC-USD \
+  --grid-lines 8 \
+  --lookback-minutes 43200
+```
+
+Compare multiple grid densities over the same window (for example 8 vs 10 lines over ~30 days):
+
+```bash
+python backtest.py \
+  --csv data/btc_usd_1m.csv \
+  --product-id BTC-USD \
+  --compare-grid-lines 8,10 \
+  --lookback-minutes 43200
+```
+
+The script prints JSON metrics per scenario, including ending equity, net PnL, fills, and residual open orders.
+
 ## Prometheus + Grafana observability
 
 When dashboard is enabled, the bot also serves a Prometheus endpoint (default: `http://127.0.0.1:8080/metrics`).

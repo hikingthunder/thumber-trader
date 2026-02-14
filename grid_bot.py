@@ -166,6 +166,9 @@ class GridBot:
         self.base_currency = self.config.product_id.split("-")[0]
         self.shared_paper_portfolio = shared_paper_portfolio
         self.orders_path = orders_path
+        self._db = sqlite3.connect(self.config.state_db_path, check_same_thread=False)
+        self._db_lock = threading.RLock()
+        self._init_db()
         self.orders: Dict[str, Dict[str, Any]] = self._load_orders()
         self._running = True
         self.grid_levels: List[Decimal] = []
@@ -204,9 +207,6 @@ class GridBot:
         self._api_latency_observation_count = 0
         self._api_latency_observation_sum_ms = 0.0
         self._emergency_stop_triggered = False
-        self._db = sqlite3.connect(self.config.state_db_path, check_same_thread=False)
-        self._db_lock = threading.RLock()
-        self._init_db()
         self._migrate_orders_json_if_needed()
 
     async def run(self) -> None:
