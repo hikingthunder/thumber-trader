@@ -21,6 +21,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
 - Enhances paper trading with queue-delay, exceed-threshold, and slippage simulation.
 - Exposes daily normalized PnL, turnover, and VaR/CVaR risk metrics in dashboard status.
+- Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, and Coinbase API latency histogram.
 - Applies risk controls (USD reserve, BTC inventory cap, stop-loss awareness).
 - Adds trend bias (EMA fast/slow over Coinbase candles) to be more defensive in downtrends.
 
@@ -117,6 +118,10 @@ DASHBOARD_ENABLED=true
 DASHBOARD_HOST=127.0.0.1
 DASHBOARD_PORT=8080
 
+# Prometheus exporter endpoint (scrape with Prometheus; visualize in Grafana)
+PROMETHEUS_ENABLED=true
+PROMETHEUS_PATH=/metrics
+
 # Safer dry-run mode (simulated fills + balances)
 PAPER_TRADING_MODE=false
 PAPER_START_USD=1000
@@ -174,6 +179,21 @@ If dashboard is enabled, open `http://127.0.0.1:8080` (or your configured host/p
 The dashboard now exposes configuration on a dedicated page at `/config` (and a popup launcher from `/`) so runtime controls stay clean while edits happen in a focused view. You can apply all bot env variables live and persist them back to `.env` (or `BOT_ENV_PATH`) without using SSH editors like nano/vim.
 
 Use `PAPER_TRADING_MODE=true` for a live-data dry run without sending exchange orders.
+
+
+## Prometheus + Grafana observability
+
+When dashboard is enabled, the bot also serves a Prometheus endpoint (default: `http://127.0.0.1:8080/metrics`).
+
+Included metrics:
+
+- `bot_realized_pnl_usd` (gauge): cumulative realized PnL in USD.
+- `bot_inventory_ratio` (gauge): base-asset notional / total portfolio value.
+- `bot_equity_curve_usd` (gauge): mark-to-market portfolio equity in USD.
+- `bot_pnl_per_1k` (gauge): daily realized PnL normalized per $1k capital.
+- `api_latency_milliseconds` (histogram): latency distribution for Coinbase REST/public calls.
+
+This makes it straightforward to build a Grafana dashboard that overlays strategy outputs (equity / PnL per $1k) with API health (latency).
 
 ## 5) Install as systemd service
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import bisect
 import json
 import logging
 import os
@@ -105,6 +106,8 @@ class BotConfig:
     dashboard_enabled: bool = os.getenv("DASHBOARD_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     dashboard_host: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
     dashboard_port: int = int(os.getenv("DASHBOARD_PORT", "8080"))
+    prometheus_enabled: bool = os.getenv("PROMETHEUS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    prometheus_path: str = os.getenv("PROMETHEUS_PATH", "/metrics")
 
     # trailing grid behavior
     trailing_grid_enabled: bool = os.getenv("TRAILING_GRID_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -187,6 +190,11 @@ class GridBot:
         self._daily_turnover_usd = Decimal("0")
         self._daily_day_index = int(time.time() // 86400)
         self._paper_inventory_cost_usd = self.config.paper_start_base * self.grid_anchor_price
+        self._realized_pnl_total = Decimal("0")
+        self._api_latency_buckets_ms = [50, 100, 250, 500, 1000, 2000, 5000, 10000]
+        self._api_latency_bucket_counts = [0 for _ in self._api_latency_buckets_ms]
+        self._api_latency_observation_count = 0
+        self._api_latency_observation_sum_ms = 0.0
         self._emergency_stop_triggered = False
         self._db = sqlite3.connect(self.config.state_db_path, check_same_thread=False)
         self._db_lock = threading.RLock()
@@ -285,7 +293,7 @@ class GridBot:
                 await asyncio.sleep(2)
 
     def _load_product_metadata(self) -> None:
-        product = _as_dict(self.client.get_product(product_id=self.config.product_id))
+        product = _as_dict(self._coinbase_api_call("get_product", self.client.get_product, product_id=self.config.product_id))
         if product.get("quote_increment"):
             self.price_increment = Decimal(str(product["quote_increment"]))
         if product.get("base_increment"):
@@ -293,7 +301,7 @@ class GridBot:
         logging.info("Metadata: quote_increment=%s base_increment=%s", self.price_increment, self.base_increment)
 
     def _get_current_price(self) -> Decimal:
-        product = _as_dict(self.client.get_product(product_id=self.config.product_id))
+        product = _as_dict(self._coinbase_api_call("get_product", self.client.get_product, product_id=self.config.product_id))
         raw = product.get("price")
         if raw is None:
             raise RuntimeError(f"Unable to read product price: {product}")
@@ -486,7 +494,7 @@ class GridBot:
 
     def _order_status(self, order_id: str, record: Dict[str, Any], current_price: Decimal) -> str:
         if not self.config.paper_trading_mode:
-            order = _as_dict(self.client.get_order(order_id=order_id))
+            order = _as_dict(self._coinbase_api_call("get_order", self.client.get_order, order_id=order_id))
             return str(order.get("status", "")).upper()
 
         side = str(record["side"]).upper()
@@ -694,7 +702,7 @@ class GridBot:
         )
         url = f"https://api.coinbase.com/api/v3/brokerage/products/{self.config.product_id}/candles?{params}"
         try:
-            with urllib.request.urlopen(url, timeout=15) as resp:
+            with self._coinbase_api_call("public_candles", urllib.request.urlopen, url, timeout=15) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             logging.warning("Trend candle fetch failed: %s", exc)
@@ -737,7 +745,7 @@ class GridBot:
                 return self.shared_paper_portfolio.get_balance(currency)
             return self.paper_balances.get(currency, Decimal("0"))
 
-        payload = _as_dict(self.client.get_accounts())
+        payload = _as_dict(self._coinbase_api_call("get_accounts", self.client.get_accounts))
         for account in payload.get("accounts", []):
             if account.get("currency") == currency:
                 raw = account.get("available_balance", {}).get("value")
@@ -801,7 +809,9 @@ class GridBot:
             self.paper_balances["USD"] = self.paper_balances.get("USD", Decimal("0")) + proceeds
             self.paper_balances[self.base_currency] = self.paper_balances.get(self.base_currency, Decimal("0")) - base_size
             self._paper_inventory_cost_usd = max(Decimal("0"), self._paper_inventory_cost_usd - cost_basis)
-            self._daily_realized_pnl += proceeds - cost_basis
+            realized = proceeds - cost_basis
+            self._daily_realized_pnl += realized
+            self._realized_pnl_total += realized
 
     def _add_event(self, message: str) -> None:
         with self._state_lock:
@@ -987,6 +997,7 @@ class GridBot:
                 "ranging_score": str(self.ranging_score()),
                 "maker_fee_pct": str(self._effective_maker_fee_pct),
                 "daily_realized_pnl_usd": str(self._daily_realized_pnl),
+                "realized_pnl_total_usd": str(self._realized_pnl_total),
                 "daily_pnl_per_1k": str(pnl_per_1k),
                 "daily_turnover_ratio": str(turnover_ratio),
                 "risk_metrics": risk,
@@ -1070,6 +1081,15 @@ class GridBot:
                     self.wfile.write(payload)
                     return
 
+                if bot.config.prometheus_enabled and parsed.path == bot.config.prometheus_path:
+                    payload = bot._prometheus_metrics_payload().encode("utf-8")
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+
                 if parsed.path == "/api/tax_report.csv":
                     year = None
                     params = urllib.parse.parse_qs(parsed.query)
@@ -1147,6 +1167,60 @@ class GridBot:
         self._dashboard_server.shutdown()
         self._dashboard_server.server_close()
         self._dashboard_server = None
+
+    def _coinbase_api_call(self, operation: str, func: Any, *args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            elapsed_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+            self._observe_api_latency(elapsed_ms)
+
+    def _observe_api_latency(self, elapsed_ms: float) -> None:
+        with self._state_lock:
+            self._api_latency_observation_count += 1
+            self._api_latency_observation_sum_ms += elapsed_ms
+            idx = bisect.bisect_left(self._api_latency_buckets_ms, elapsed_ms)
+            if idx >= len(self._api_latency_bucket_counts):
+                return
+            self._api_latency_bucket_counts[idx] += 1
+
+    def _prometheus_metrics_payload(self) -> str:
+        with self._state_lock:
+            price = self.last_price
+            usd_bal = self._get_available_balance("USD")
+            base_bal = self._get_available_balance(self.base_currency)
+            portfolio = usd_bal + (base_bal * price if price > 0 else Decimal("0"))
+            inventory_ratio = self._btc_inventory_ratio(price if price > 0 else Decimal("0"))
+            capital_used = max(Decimal("1"), portfolio)
+            pnl_per_1k = (self._daily_realized_pnl / capital_used) * Decimal("1000")
+
+            labels = f'product_id="{self.config.product_id}"'
+            lines = [
+                "# HELP bot_realized_pnl_usd Total realized profit in USD.",
+                "# TYPE bot_realized_pnl_usd gauge",
+                f"bot_realized_pnl_usd{{{labels}}} {float(self._realized_pnl_total)}",
+                "# HELP bot_inventory_ratio Base asset notional / total portfolio value ratio.",
+                "# TYPE bot_inventory_ratio gauge",
+                f"bot_inventory_ratio{{{labels}}} {float(inventory_ratio)}",
+                "# HELP bot_equity_curve_usd Mark-to-market equity in USD.",
+                "# TYPE bot_equity_curve_usd gauge",
+                f"bot_equity_curve_usd{{{labels}}} {float(portfolio)}",
+                "# HELP bot_pnl_per_1k Daily realized PnL per $1k of capital in USD.",
+                "# TYPE bot_pnl_per_1k gauge",
+                f"bot_pnl_per_1k{{{labels}}} {float(pnl_per_1k)}",
+                "# HELP api_latency_milliseconds Coinbase API call latency histogram in milliseconds.",
+                "# TYPE api_latency_milliseconds histogram",
+            ]
+
+            cumulative = 0
+            for limit, count in zip(self._api_latency_buckets_ms, self._api_latency_bucket_counts):
+                cumulative += count
+                lines.append(f'api_latency_milliseconds_bucket{{{labels},le="{limit}"}} {cumulative}')
+            lines.append(f'api_latency_milliseconds_bucket{{{labels},le="+Inf"}} {self._api_latency_observation_count}')
+            lines.append(f"api_latency_milliseconds_sum{{{labels}}} {self._api_latency_observation_sum_ms}")
+            lines.append(f"api_latency_milliseconds_count{{{labels}}} {self._api_latency_observation_count}")
+            return "\n".join(lines) + "\n"
 
     def _handle_dashboard_action(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         if action == "kill_switch":
