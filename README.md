@@ -164,6 +164,8 @@ Watch logs for initial grid placement and no permission errors.
 
 If dashboard is enabled, open `http://127.0.0.1:8080` (or your configured host/port) to monitor runtime status, open orders, recent events, and JSON status (`/api/status`).
 
+The dashboard now exposes configuration on a dedicated page at `/config` (and a popup launcher from `/`) so runtime controls stay clean while edits happen in a focused view. You can apply all bot env variables live and persist them back to `.env` (or `BOT_ENV_PATH`) without using SSH editors like nano/vim.
+
 Use `PAPER_TRADING_MODE=true` for a live-data dry run without sending exchange orders.
 
 ## 5) Install as systemd service
@@ -251,3 +253,11 @@ If dashboard is enabled, you can also download CSV directly:
 - `http://127.0.0.1:8080/api/tax_report.csv`
 - `http://127.0.0.1:8080/api/tax_report.csv?year=2025`
 
+
+## Code layout (modularized)
+
+- `grid_bot.py`: trading loop, exchange interactions, persistence, and HTTP routing.
+- `dashboard_views.py`: dashboard and config-page HTML renderers (web UI layer).
+- `config_schema.py`: shared env/config field schema used by runtime updates and UI rendering.
+
+This keeps the project on a clearer path toward separate web/backend/trading concerns as it grows.
