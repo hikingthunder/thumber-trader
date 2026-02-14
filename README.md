@@ -13,7 +13,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Can auto-size grid bands using ATR (`ATR_ENABLED=true`).
 - Enforces fee-aware spacing floor via maker-fee + target-net-profit settings.
 - Places **post-only** limit orders (maker intent).
-- Saves open order state to `orders.json` so restart recovery works.
+- Persists state in SQLite (`grid_state.db`) for restart recovery and reporting.
 - Polls every 60 seconds by default, detects fills, and places replacement orders.
 - Supports optional exchange-side attached bracket exits for BUY entries.
 - Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
@@ -139,7 +139,10 @@ TREND_EMA_FAST=9
 TREND_EMA_SLOW=21
 TREND_STRENGTH_THRESHOLD=0.003
 
-# Optional: override order state file path
+STATE_DB_PATH=/opt/thumber-trader/grid_state.db
+# Optional legacy mirror for old tooling (disabled by default)
+LEGACY_ORDERS_JSON_ENABLED=false
+# Optional: legacy order-state mirror path when enabled
 # ORDERS_PATH=/opt/thumber-trader/orders.json
 ENV
 ```
@@ -222,3 +225,29 @@ journalctl -u thumber-gridbot.service -f
 - This bot uses only Coinbase data for trend bias; no third-party sentiment feed is required.
 - No strategy can guarantee profit or fully eliminate drawdown risk.
 - Start with small size, validate behavior in logs, then scale.
+
+## Tax-time export
+
+All fills are stored in SQLite (`fills` table) and can be exported to CSV for accounting/tax workflows.
+
+Export all fills:
+
+```bash
+cd /opt/thumber-trader
+set -a && source .env && set +a
+.venv/bin/python grid_bot.py --export-tax-report fills_tax_report.csv
+```
+
+Export a single tax year:
+
+```bash
+cd /opt/thumber-trader
+set -a && source .env && set +a
+.venv/bin/python grid_bot.py --export-tax-report fills_tax_report_2025.csv --tax-year 2025
+```
+
+If dashboard is enabled, you can also download CSV directly:
+
+- `http://127.0.0.1:8080/api/tax_report.csv`
+- `http://127.0.0.1:8080/api/tax_report.csv?year=2025`
+
