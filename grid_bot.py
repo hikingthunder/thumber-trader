@@ -10,12 +10,13 @@ Core behavior:
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import json
 import logging
 import os
 import signal
 import sqlite3
-import argparse
 import stat
 import threading
 import time
@@ -140,6 +141,9 @@ class GridBot:
         self.recent_events: List[str] = []
         self._dashboard_server: Optional[ThreadingHTTPServer] = None
         self._state_lock = threading.RLock()
+        self._ws_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._ws_client: Optional[Any] = None
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._cached_trend_strength = Decimal("0")
         self._active_inventory_cap_pct = self.config.max_btc_inventory_pct
         self.paper_balances = {
@@ -158,7 +162,8 @@ class GridBot:
         self._init_db()
         self._migrate_orders_json_if_needed()
 
-    def run(self) -> None:
+    async def run(self) -> None:
+        self._event_loop = asyncio.get_running_loop()
         if self.config.dashboard_enabled:
             self._start_dashboard_server()
         self._load_product_metadata()
@@ -177,26 +182,76 @@ class GridBot:
         else:
             logging.info("Loaded %s persisted active orders.", len(self.orders))
 
+        tasks = [
+            asyncio.create_task(self._market_poll_loop(), name="market-poll-loop"),
+            asyncio.create_task(self._risk_monitor_loop(), name="risk-monitor-loop"),
+            asyncio.create_task(self._ws_user_listener_loop(), name="ws-user-listener"),
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            self._running = False
+            self._close_ws_client()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._stop_dashboard_server()
+
+    async def _market_poll_loop(self) -> None:
         while self._running:
             try:
-                current_price = self._get_current_price()
-                self._refresh_maker_fee()
-                trend_bias = self._get_trend_bias()
+                current_price = await asyncio.to_thread(self._get_current_price)
+                await asyncio.to_thread(self._refresh_maker_fee)
+                trend_bias = await asyncio.to_thread(self._get_trend_bias)
                 with self._state_lock:
                     self.loop_count += 1
                     self.last_price = current_price
                     self.last_trend_bias = trend_bias
-                self._risk_monitor(current_price)
-                self._maybe_roll_grid(current_price)
-                self._process_open_orders(current_price=current_price, trend_bias=trend_bias)
-                self._save_orders()
-                self._record_daily_stats_snapshot(current_price)
+                await asyncio.to_thread(self._maybe_roll_grid, current_price)
+                await asyncio.to_thread(self._process_open_orders, current_price, trend_bias)
+                await asyncio.to_thread(self._save_orders)
+                await asyncio.to_thread(self._record_daily_stats_snapshot, current_price)
             except Exception as exc:
-                logging.exception("Loop error: %s", exc)
+                logging.exception("Market loop error: %s", exc)
             if self._running:
-                time.sleep(self.config.poll_seconds)
+                await asyncio.sleep(self.config.poll_seconds)
 
-        self._stop_dashboard_server()
+    async def _risk_monitor_loop(self) -> None:
+        while self._running:
+            try:
+                current_price = self.last_price or await asyncio.to_thread(self._get_current_price)
+                await asyncio.to_thread(self._risk_monitor, current_price)
+            except Exception as exc:
+                logging.exception("Risk loop error: %s", exc)
+            await asyncio.sleep(max(5, self.config.poll_seconds // 2))
+
+    async def _ws_user_listener_loop(self) -> None:
+        if self.config.paper_trading_mode:
+            return
+        while self._running:
+            try:
+                client = await asyncio.to_thread(self._build_ws_user_client)
+                if client is None:
+                    logging.info("WSUserClient unavailable; falling back to polling-only fills.")
+                    return
+                self._ws_client = client
+                await asyncio.to_thread(self._ws_subscribe_user_channel, client)
+                while self._running:
+                    filled_order_id = await asyncio.wait_for(self._ws_queue.get(), timeout=1.0)
+                    if not filled_order_id:
+                        continue
+                    if filled_order_id in self.orders:
+                        current_price = self.last_price or await asyncio.to_thread(self._get_current_price)
+                        trend_bias = self.last_trend_bias or "NEUTRAL"
+                        await asyncio.to_thread(self._process_open_orders, current_price, trend_bias)
+                        await asyncio.to_thread(self._save_orders)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as exc:
+                logging.warning("WebSocket listener error: %s", exc)
+                self._close_ws_client()
+                await asyncio.sleep(2)
 
     def _load_product_metadata(self) -> None:
         product = _as_dict(self.client.get_product(product_id=self.config.product_id))
@@ -212,6 +267,67 @@ class GridBot:
         if raw is None:
             raise RuntimeError(f"Unable to read product price: {product}")
         return Decimal(str(raw))
+
+    def _build_ws_user_client(self) -> Optional[Any]:
+        try:
+            from coinbase.websocket import WSUserClient
+        except Exception as exc:
+            logging.warning("WSUserClient import failed: %s", exc)
+            return None
+
+        api_key = _read_secret("COINBASE_API_KEY", "COINBASE_API_KEY_FILE")
+        api_secret = _read_secret("COINBASE_API_SECRET", "COINBASE_API_SECRET_FILE")
+        if not api_key or not api_secret:
+            logging.warning("WebSocket disabled: missing Coinbase API credentials.")
+            return None
+
+        def _on_message(msg: Any) -> None:
+            try:
+                payload = msg if isinstance(msg, dict) else json.loads(str(msg))
+            except Exception:
+                return
+            events = payload.get("events", []) if isinstance(payload, dict) else []
+            for event in events:
+                if str(event.get("type", "")).lower() != "update":
+                    continue
+                for order in event.get("orders", []):
+                    status = str(order.get("status", "")).upper()
+                    if status in {"FILLED", "DONE", "COMPLETED"}:
+                        order_id = str(order.get("order_id", "")).strip()
+                        if order_id:
+                            if self._event_loop is not None:
+                                self._event_loop.call_soon_threadsafe(self._ws_queue.put_nowait, order_id)
+
+        try:
+            return WSUserClient(api_key=api_key, api_secret=api_secret, on_message=_on_message)
+        except TypeError:
+            return WSUserClient(api_key=api_key, api_secret=api_secret, on_message=_on_message, verbose=False)
+
+    def _ws_subscribe_user_channel(self, ws_client: Any) -> None:
+        subscribe = getattr(ws_client, "subscribe", None)
+        open_fn = getattr(ws_client, "open", None)
+        start_fn = getattr(ws_client, "run_forever", None)
+
+        if callable(open_fn):
+            open_fn()
+        if callable(subscribe):
+            subscribe(channels=["user"], product_ids=[self.config.product_id])
+        subscribe_user = getattr(ws_client, "subscribe_user", None)
+        if callable(subscribe_user):
+            subscribe_user(product_ids=[self.config.product_id])
+        if callable(start_fn):
+            start_fn()
+
+    def _close_ws_client(self) -> None:
+        if self._ws_client is None:
+            return
+        close_fn = getattr(self._ws_client, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                pass
+        self._ws_client = None
 
     def _build_grid_levels(self, current_price: Decimal) -> List[Decimal]:
         if self.config.grid_lines < 2:
@@ -1423,7 +1539,7 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
-    bot.run()
+    asyncio.run(bot.run())
 
 
 if __name__ == "__main__":

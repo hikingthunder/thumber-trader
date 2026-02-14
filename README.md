@@ -14,7 +14,9 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Enforces fee-aware spacing floor via maker-fee + target-net-profit settings.
 - Places **post-only** limit orders (maker intent).
 - Persists state in SQLite (`grid_state.db`) for restart recovery and reporting.
-- Polls every 60 seconds by default, detects fills, and places replacement orders.
+- Runs the core engine on `asyncio` with concurrent market polling, risk monitoring, and user-stream handling.
+- Uses Coinbase `WSUserClient` for low-latency fill notifications and immediate replacement orders.
+- Keeps periodic polling (60s default) as a resilience backstop and market-data refresh path.
 - Supports optional exchange-side attached bracket exits for BUY entries.
 - Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
 - Enhances paper trading with queue-delay, exceed-threshold, and slippage simulation.
