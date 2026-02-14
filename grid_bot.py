@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import bisect
 import contextlib
+import collections
 import json
 import logging
 import os
@@ -153,6 +154,17 @@ class BotConfig:
     cross_asset_candle_lookback: int = int(os.getenv("CROSS_ASSET_CANDLE_LOOKBACK", "48"))
     cross_asset_refresh_seconds: int = int(os.getenv("CROSS_ASSET_REFRESH_SECONDS", "300"))
 
+    # operational circuit breaker
+    api_circuit_breaker_enabled: bool = os.getenv("API_CIRCUIT_BREAKER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    api_latency_p95_threshold_ms: float = float(os.getenv("API_LATENCY_P95_THRESHOLD_MS", "2000"))
+    api_failure_rate_threshold_pct: Decimal = Decimal(os.getenv("API_FAILURE_RATE_THRESHOLD_PCT", "0.05"))
+    api_health_window_seconds: int = int(os.getenv("API_HEALTH_WINDOW_SECONDS", "300"))
+    api_recovery_consecutive_minutes: int = int(os.getenv("API_RECOVERY_CONSECUTIVE_MINUTES", "5"))
+
+    # optional Telegram notifications
+    telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
 
 class SharedPaperPortfolio:
     def __init__(self, usd: Decimal):
@@ -258,6 +270,15 @@ class GridBot:
         self._api_latency_bucket_counts = [0 for _ in self._api_latency_buckets_ms]
         self._api_latency_observation_count = 0
         self._api_latency_observation_sum_ms = 0.0
+        self._api_health_samples: collections.deque[Tuple[float, float, bool]] = collections.deque()
+        self._api_safe_mode = False
+        self._api_recovery_healthy_minutes = 0
+        self._last_api_health_report = {
+            "sample_count": 0,
+            "failure_rate": 0.0,
+            "p95_latency_ms": 0.0,
+            "healthy": True,
+        }
         self._emergency_stop_triggered = False
         self._migrate_orders_json_if_needed()
 
@@ -285,6 +306,7 @@ class GridBot:
             asyncio.create_task(self._market_poll_loop(), name="market-poll-loop"),
             asyncio.create_task(self._risk_monitor_loop(), name="risk-monitor-loop"),
             asyncio.create_task(self._ws_user_listener_loop(), name="ws-user-listener"),
+            asyncio.create_task(self._api_health_monitor_loop(), name="api-health-monitor"),
         ]
         try:
             await asyncio.gather(*tasks)
@@ -324,6 +346,16 @@ class GridBot:
             except Exception as exc:
                 logging.exception("Risk loop error: %s", exc)
             await asyncio.sleep(max(5, self.config.poll_seconds // 2))
+
+    async def _api_health_monitor_loop(self) -> None:
+        if not self.config.api_circuit_breaker_enabled:
+            return
+        while self._running:
+            try:
+                await asyncio.to_thread(self._evaluate_api_health)
+            except Exception as exc:
+                logging.exception("API health monitor loop error: %s", exc)
+            await asyncio.sleep(60)
 
     async def _ws_user_listener_loop(self) -> None:
         if self.config.paper_trading_mode:
@@ -706,6 +738,9 @@ class GridBot:
 
         price = self._q_price(price)
         if side == "BUY":
+            if self._api_safe_mode:
+                logging.warning("Skipped BUY at %s because API safe mode is active.", price)
+                return None
             if usd_notional is None:
                 raise ValueError("usd_notional is required for BUY")
 
@@ -764,7 +799,7 @@ class GridBot:
         if self.config.paper_trading_mode:
             order_id = f"paper-{uuid.uuid4()}"
         else:
-            response = _as_dict(self.client.create_order(**payload))
+            response = _as_dict(self._coinbase_api_call("create_order", self.client.create_order, **payload))
             if not bool(response.get("success", True)):
                 logging.error("Order rejected: %s", response)
                 return None
@@ -1186,6 +1221,8 @@ class GridBot:
                 "realized_pnl_total_usd": str(self._realized_pnl_total),
                 "daily_pnl_per_1k": str(pnl_per_1k),
                 "daily_turnover_ratio": str(turnover_ratio),
+                "api_safe_mode": self._api_safe_mode,
+                "api_health": dict(self._last_api_health_report),
                 "risk_metrics": risk,
                 "portfolio_beta": str(portfolio_beta),
                 "recent_events": list(self.recent_events),
@@ -1249,6 +1286,8 @@ class GridBot:
             return int(value)
         if value_type == "decimal":
             return Decimal(value)
+        if value_type == "float":
+            return float(value)
         if value_type == "bool":
             return value.lower() in {"1", "true", "yes", "on"}
         raise ValueError(f"Unsupported config type: {value_type}")
@@ -1357,11 +1396,15 @@ class GridBot:
 
     def _coinbase_api_call(self, operation: str, func: Any, *args: Any, **kwargs: Any) -> Any:
         started = time.perf_counter()
+        succeeded = False
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            succeeded = True
+            return result
         finally:
             elapsed_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
             self._observe_api_latency(elapsed_ms)
+            self._record_api_health_sample(elapsed_ms=elapsed_ms, succeeded=succeeded)
 
     def _observe_api_latency(self, elapsed_ms: float) -> None:
         with self._state_lock:
@@ -1371,6 +1414,82 @@ class GridBot:
             if idx >= len(self._api_latency_bucket_counts):
                 return
             self._api_latency_bucket_counts[idx] += 1
+
+    def _record_api_health_sample(self, elapsed_ms: float, succeeded: bool) -> None:
+        now = time.time()
+        with self._state_lock:
+            self._api_health_samples.append((now, elapsed_ms, succeeded))
+            self._trim_api_health_samples_locked(now)
+
+    def _trim_api_health_samples_locked(self, now: Optional[float] = None) -> None:
+        now = now if now is not None else time.time()
+        window_start = now - self.config.api_health_window_seconds
+        while self._api_health_samples and self._api_health_samples[0][0] < window_start:
+            self._api_health_samples.popleft()
+
+    def _evaluate_api_health(self) -> None:
+        with self._state_lock:
+            self._trim_api_health_samples_locked()
+            samples = list(self._api_health_samples)
+
+        sample_count = len(samples)
+        if sample_count == 0:
+            return
+
+        failures = sum(1 for _, _, ok in samples if not ok)
+        failure_rate = failures / sample_count
+        latencies = sorted(lat for _, lat, _ in samples)
+        p95_index = min(len(latencies) - 1, max(0, int(len(latencies) * 0.95) - 1))
+        p95_latency = latencies[p95_index]
+        healthy = (
+            p95_latency <= self.config.api_latency_p95_threshold_ms
+            and failure_rate <= float(self.config.api_failure_rate_threshold_pct)
+        )
+
+        with self._state_lock:
+            self._last_api_health_report = {
+                "sample_count": sample_count,
+                "failure_rate": failure_rate,
+                "p95_latency_ms": p95_latency,
+                "healthy": healthy,
+            }
+
+            if not healthy:
+                self._api_recovery_healthy_minutes = 0
+                if not self._api_safe_mode:
+                    self._api_safe_mode = True
+                    self._add_event("API instability detected: entering safe mode")
+                    logging.warning(
+                        "API instability detected (p95=%.2fms, failure_rate=%.2f%%): entering safe mode.",
+                        p95_latency,
+                        failure_rate * 100,
+                    )
+                    self._send_telegram_alert("🚨 API Instability Detected: Entering Safe Mode")
+            elif self._api_safe_mode:
+                self._api_recovery_healthy_minutes += 1
+                if self._api_recovery_healthy_minutes >= self.config.api_recovery_consecutive_minutes:
+                    self._api_safe_mode = False
+                    self._api_recovery_healthy_minutes = 0
+                    self._add_event("API health recovered: exiting safe mode")
+                    logging.info(
+                        "API health recovered for %s consecutive minutes. Exiting safe mode.",
+                        self.config.api_recovery_consecutive_minutes,
+                    )
+
+    def _send_telegram_alert(self, text: str) -> None:
+        token = self.config.telegram_bot_token.strip()
+        chat_id = self.config.telegram_chat_id.strip()
+        if not token or not chat_id:
+            return
+        data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "disable_notification": "false"}).encode("utf-8")
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        try:
+            req = urllib.request.Request(url, data=data, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status >= 400:
+                    logging.warning("Telegram alert failed with HTTP %s", resp.status)
+        except Exception as exc:
+            logging.warning("Telegram alert failed: %s", exc)
 
     def _prometheus_metrics_payload(self) -> str:
         with self._state_lock:
@@ -1402,6 +1521,9 @@ class GridBot:
                 f"bot_portfolio_beta{{{labels}}} {float(portfolio_beta)}",
                 "# HELP api_latency_milliseconds Coinbase API call latency histogram in milliseconds.",
                 "# TYPE api_latency_milliseconds histogram",
+                "# HELP bot_api_safe_mode Whether API circuit breaker safe mode is active (1=active).",
+                "# TYPE bot_api_safe_mode gauge",
+                f"bot_api_safe_mode{{{labels}}} {1 if self._api_safe_mode else 0}",
             ]
 
             cumulative = 0
@@ -1687,7 +1809,7 @@ class GridBot:
             "side": "BUY",
             "order_configuration": {"market_market_ioc": {"quote_size": format(quote_size, "f")}},
         }
-        _ = self.client.create_order(**payload)
+        _ = self._coinbase_api_call("create_order", self.client.create_order, **payload)
         self._add_event(f"Auto base-buy executed for {base_size} BTC")
 
 
@@ -1758,6 +1880,14 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("CROSS_ASSET_CANDLE_LOOKBACK must be >= 2")
     if config.cross_asset_refresh_seconds < 5:
         raise ValueError("CROSS_ASSET_REFRESH_SECONDS must be >= 5")
+    if config.api_latency_p95_threshold_ms <= 0:
+        raise ValueError("API_LATENCY_P95_THRESHOLD_MS must be > 0")
+    if not (Decimal("0") <= config.api_failure_rate_threshold_pct <= Decimal("1")):
+        raise ValueError("API_FAILURE_RATE_THRESHOLD_PCT must be in [0,1]")
+    if config.api_health_window_seconds < 60:
+        raise ValueError("API_HEALTH_WINDOW_SECONDS must be >= 60")
+    if config.api_recovery_consecutive_minutes < 1:
+        raise ValueError("API_RECOVERY_CONSECUTIVE_MINUTES must be >= 1")
 
 
 def _orders_path() -> Path:
