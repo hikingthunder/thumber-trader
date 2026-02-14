@@ -183,9 +183,10 @@ class GridBot:
         self.recent_events: List[str] = []
         self._dashboard_server: Optional[ThreadingHTTPServer] = None
         self._state_lock = threading.RLock()
-        self._ws_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._ws_queue: asyncio.Queue[Dict[str, str]] = asyncio.Queue()
         self._ws_client: Optional[Any] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._last_ws_sequence: Optional[int] = self._load_last_ws_sequence()
         self._cached_trend_strength = Decimal("0")
         self._cached_atr_pct = Decimal("0")
         self._cached_adx = Decimal("0")
@@ -285,10 +286,15 @@ class GridBot:
                 self._ws_client = client
                 await asyncio.to_thread(self._ws_subscribe_user_channel, client)
                 while self._running:
-                    filled_order_id = await asyncio.wait_for(self._ws_queue.get(), timeout=1.0)
-                    if not filled_order_id:
+                    ws_event = await asyncio.wait_for(self._ws_queue.get(), timeout=1.0)
+                    if not ws_event:
                         continue
-                    if filled_order_id in self.orders:
+                    event_type = ws_event.get("type", "")
+                    if event_type == "reconcile":
+                        await asyncio.to_thread(self._reconcile_state_from_exchange)
+                        continue
+                    filled_order_id = ws_event.get("order_id", "")
+                    if filled_order_id and filled_order_id in self.orders:
                         current_price = self.last_price or await asyncio.to_thread(self._get_current_price)
                         trend_bias = self.last_trend_bias or "NEUTRAL"
                         await asyncio.to_thread(self._process_open_orders, current_price, trend_bias)
@@ -333,6 +339,14 @@ class GridBot:
                 payload = msg if isinstance(msg, dict) else json.loads(str(msg))
             except Exception:
                 return
+
+            sequence = self._extract_ws_sequence(payload)
+            if sequence is not None and self._ws_sequence_gap_detected(sequence):
+                logging.warning("WebSocket sequence gap detected; queueing REST reconciliation.")
+                if self._event_loop is not None:
+                    self._event_loop.call_soon_threadsafe(self._ws_queue.put_nowait, {"type": "reconcile"})
+                return
+
             events = payload.get("events", []) if isinstance(payload, dict) else []
             for event in events:
                 if str(event.get("type", "")).lower() != "update":
@@ -343,7 +357,10 @@ class GridBot:
                         order_id = str(order.get("order_id", "")).strip()
                         if order_id:
                             if self._event_loop is not None:
-                                self._event_loop.call_soon_threadsafe(self._ws_queue.put_nowait, order_id)
+                                self._event_loop.call_soon_threadsafe(
+                                    self._ws_queue.put_nowait,
+                                    {"type": "filled", "order_id": order_id},
+                                )
 
         try:
             return WSUserClient(api_key=api_key, api_secret=api_secret, on_message=_on_message)
@@ -375,6 +392,80 @@ class GridBot:
             except Exception:
                 pass
         self._ws_client = None
+
+    def _extract_ws_sequence(self, payload: Dict[str, Any]) -> Optional[int]:
+        for key in ("sequence_num", "sequence", "sequence_number"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _ws_sequence_gap_detected(self, sequence: int) -> bool:
+        with self._state_lock:
+            if self._last_ws_sequence is None:
+                self._last_ws_sequence = sequence
+                self._save_last_ws_sequence(sequence)
+                return False
+
+            if sequence <= self._last_ws_sequence:
+                return False
+
+            expected = self._last_ws_sequence + 1
+            gap_detected = sequence != expected
+            self._last_ws_sequence = sequence
+            self._save_last_ws_sequence(sequence)
+            return gap_detected
+
+    def _reconcile_state_from_exchange(self) -> None:
+        get_orders = getattr(self.client, "get_orders", None)
+        if not callable(get_orders):
+            logging.warning("State reconciliation skipped: REST client has no get_orders method.")
+            return
+
+        payload = _as_dict(self._coinbase_api_call("get_orders", get_orders))
+        remote_orders = payload.get("orders", []) if isinstance(payload, dict) else []
+        statuses_open = {"OPEN", "PENDING", "ACTIVE", "QUEUED"}
+        reconciled: Dict[str, Dict[str, Any]] = {}
+        now = time.time()
+
+        for order in remote_orders:
+            if str(order.get("product_id", "")).upper() != self.config.product_id.upper():
+                continue
+            status = str(order.get("status", "")).upper()
+            if status and status not in statuses_open:
+                continue
+
+            order_id = str(order.get("order_id", "")).strip()
+            side = str(order.get("side", "")).upper()
+            if not order_id or side not in {"BUY", "SELL"}:
+                continue
+
+            order_cfg = order.get("order_configuration", {}).get("limit_limit_gtc", {})
+            limit_price = order_cfg.get("limit_price") or order.get("limit_price") or order.get("price")
+            base_size = order_cfg.get("base_size") or order.get("base_size")
+            if limit_price is None or base_size is None:
+                continue
+
+            price = self._q_price(Decimal(str(limit_price)))
+            grid_index = min(range(len(self.grid_levels)), key=lambda idx: abs(self.grid_levels[idx] - price)) if self.grid_levels else 0
+            reconciled[order_id] = {
+                "side": side,
+                "price": str(price),
+                "base_size": str(self._q_base(Decimal(str(base_size)))),
+                "grid_index": grid_index,
+                "product_id": self.config.product_id,
+                "created_ts": now,
+                "eligible_fill_ts": now,
+            }
+
+        self.orders = reconciled
+        self._save_orders()
+        self._add_event(f"State reconciled via REST (open orders: {len(self.orders)})")
+        logging.info("State reconciliation complete for %s (%s open orders).", self.config.product_id, len(self.orders))
 
     def _build_grid_levels(self, current_price: Decimal) -> List[Decimal]:
         if self.config.grid_lines < 2:
@@ -1372,6 +1463,30 @@ class GridBot:
                     turnover_ratio TEXT NOT NULL
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS state_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+            self._db.commit()
+
+    def _load_last_ws_sequence(self) -> Optional[int]:
+        with self._db_lock:
+            row = self._db.execute("SELECT value FROM state_meta WHERE key='last_ws_sequence'").fetchone()
+        if row is None or row[0] is None:
+            return None
+        try:
+            return int(str(row[0]))
+        except (TypeError, ValueError):
+            return None
+
+    def _save_last_ws_sequence(self, sequence: int) -> None:
+        with self._db_lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO state_meta(key, value) VALUES('last_ws_sequence', ?)",
+                (str(sequence),),
+            )
             self._db.commit()
 
     def _save_orders_to_db(self) -> None:
