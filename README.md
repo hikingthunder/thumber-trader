@@ -134,9 +134,11 @@ API_FAILURE_RATE_THRESHOLD_PCT=0.05
 API_HEALTH_WINDOW_SECONDS=300
 API_RECOVERY_CONSECUTIVE_MINUTES=5
 
-# Optional Telegram alerting for API instability safe-mode events
+# Optional Telegram alerting + command-and-control
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+# Required for secure remote commands (/pause, /set_risk, /report)
+TELEGRAM_WHITELIST_CHAT_ID=
 
 # Safer dry-run mode (simulated fills + balances)
 PAPER_TRADING_MODE=false
@@ -215,6 +217,22 @@ Watch logs for initial grid placement and no permission errors.
 If dashboard is enabled, open `http://127.0.0.1:8080` (or your configured host/port) to monitor runtime status, open orders, recent events, and JSON status (`/api/status`).
 
 The dashboard now exposes configuration on a dedicated page at `/config` (and a popup launcher from `/`) so runtime controls stay clean while edits happen in a focused view. You can apply all bot env variables live and persist them back to `.env` (or `BOT_ENV_PATH`) without using SSH editors like nano/vim.
+
+### Telegram command-and-control (optional)
+
+Install the Telegram SDK if you want bidirectional control:
+
+```bash
+/opt/thumber-trader/.venv/bin/pip install python-telegram-bot
+```
+
+Security: set `TELEGRAM_WHITELIST_CHAT_ID` to your personal chat ID. Commands from any other chat are rejected.
+
+Supported commands:
+- `/pause <PRODUCT_ID>`: pause trading loop actions for one engine without stopping the process.
+- `/set_risk <0.0-1.0>`: update `MAX_BTC_INVENTORY_PCT` live across all running engines.
+- `/report`: return per-engine realized PnL and 95% VaR snapshot.
+
 
 Use `PAPER_TRADING_MODE=true` for a live-data dry run without sending exchange orders.
 
