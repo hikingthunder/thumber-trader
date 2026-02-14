@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import stat
 import threading
 import time
@@ -33,7 +34,7 @@ getcontext().prec = 28
 
 
 
-@dataclass(frozen=True)
+@dataclass
 class BotConfig:
     product_id: str = os.getenv("PRODUCT_ID", "BTC-USD")
     grid_lines: int = int(os.getenv("GRID_LINES", "8"))
@@ -97,6 +98,17 @@ class BotConfig:
     dashboard_host: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
     dashboard_port: int = int(os.getenv("DASHBOARD_PORT", "8080"))
 
+    # trailing grid behavior
+    trailing_grid_enabled: bool = os.getenv("TRAILING_GRID_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    trailing_trigger_levels: int = int(os.getenv("TRAILING_TRIGGER_LEVELS", "2"))
+
+    # persistence
+    state_db_path: str = os.getenv("STATE_DB_PATH", "grid_state.db")
+
+    # safe start
+    safe_start_enabled: bool = os.getenv("SAFE_START_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    base_buy_mode: str = os.getenv("BASE_BUY_MODE", "off").strip().lower()
+
 
 class GridBot:
     def __init__(self, client: RESTClient, config: BotConfig, orders_path: Path):
@@ -130,6 +142,10 @@ class GridBot:
         self._daily_day_index = int(time.time() // 86400)
         self._paper_inventory_cost_usd = self.config.paper_start_btc * self.grid_anchor_price
         self._emergency_stop_triggered = False
+        self._db = sqlite3.connect(self.config.state_db_path, check_same_thread=False)
+        self._db_lock = threading.RLock()
+        self._init_db()
+        self._migrate_orders_json_if_needed()
 
     def run(self) -> None:
         if self.config.dashboard_enabled:
@@ -141,6 +157,7 @@ class GridBot:
         if self.config.paper_trading_mode and self.config.paper_start_btc > 0:
             self._paper_inventory_cost_usd = self.config.paper_start_btc * current_price
         self.grid_levels = self._build_grid_levels(current_price)
+        self._run_safe_start_checks(current_price)
 
         if not self.orders:
             logging.info("No persisted orders found; placing initial adaptive grid.")
@@ -159,8 +176,10 @@ class GridBot:
                     self.last_price = current_price
                     self.last_trend_bias = trend_bias
                 self._risk_monitor(current_price)
+                self._maybe_roll_grid(current_price)
                 self._process_open_orders(current_price=current_price, trend_bias=trend_bias)
                 self._save_orders()
+                self._record_daily_stats_snapshot(current_price)
             except Exception as exc:
                 logging.exception("Loop error: %s", exc)
             if self._running:
@@ -284,6 +303,7 @@ class GridBot:
             self.fill_count += 1
             self._add_event(f"{side} filled @ {fill_price}")
             self._apply_fill_to_paper_balances(side=side, base_size=Decimal(str(record["base_size"])), price=fill_price)
+            self._record_fill(order_id=order_id, record=record, fill_price=fill_price)
 
             if side == "BUY" and grid_index + 1 < len(self.grid_levels):
                 if trend_bias == "DOWN":
@@ -542,6 +562,9 @@ class GridBot:
         return Decimal("0")
 
     def _load_orders(self) -> Dict[str, Dict[str, Any]]:
+        db_orders = self._load_orders_from_db()
+        if db_orders:
+            return db_orders
         if not self.orders_path.exists():
             return {}
         try:
@@ -551,6 +574,7 @@ class GridBot:
             return {}
 
     def _save_orders(self) -> None:
+        self._save_orders_to_db()
         self.orders_path.write_text(json.dumps(self.orders, indent=2, sort_keys=True))
         try:
             self.orders_path.chmod(0o600)
@@ -645,6 +669,82 @@ class GridBot:
                     logging.warning("Failed to cancel order %s: %s", order_id, exc)
         self.orders.clear()
 
+    def _cancel_single_order(self, order_id: str) -> None:
+        if self.config.paper_trading_mode:
+            self.orders.pop(order_id, None)
+            return
+        try:
+            self.client.cancel_orders(order_ids=[order_id])
+        except Exception as exc:
+            logging.warning("Failed to cancel order %s: %s", order_id, exc)
+
+    def _maybe_roll_grid(self, current_price: Decimal) -> None:
+        if not self.config.trailing_grid_enabled or len(self.grid_levels) < 2:
+            return
+
+        step = self.grid_levels[1] - self.grid_levels[0]
+        if step <= 0:
+            return
+        trigger = step * Decimal(self.config.trailing_trigger_levels)
+        moved = False
+
+        while current_price > self.grid_levels[-1] + trigger:
+            self._roll_grid_up(step)
+            moved = True
+        while current_price < self.grid_levels[0] - trigger:
+            self._roll_grid_down(step)
+            moved = True
+
+        if moved:
+            self._save_orders()
+
+    def _roll_grid_up(self, step: Decimal) -> None:
+        removed_index = 0
+        removed_order = self._find_order_by_grid_index_and_side(removed_index, "BUY")
+        if removed_order:
+            self._cancel_single_order(removed_order)
+
+        new_levels = self.grid_levels[1:] + [self._q_price(self.grid_levels[-1] + step)]
+        self.grid_levels = new_levels
+        self._reindex_orders_after_shift(direction="up")
+        self._place_grid_order(side="SELL", price=self.grid_levels[-1], base_size=self._q_base(self.config.base_order_notional_usd / self.grid_levels[-1]), grid_index=len(self.grid_levels) - 1)
+        self._add_event(f"Trailing roll up -> new top {self.grid_levels[-1]}")
+
+    def _roll_grid_down(self, step: Decimal) -> None:
+        removed_index = len(self.grid_levels) - 1
+        removed_order = self._find_order_by_grid_index_and_side(removed_index, "SELL")
+        if removed_order:
+            self._cancel_single_order(removed_order)
+
+        new_levels = [self._q_price(self.grid_levels[0] - step)] + self.grid_levels[:-1]
+        self.grid_levels = new_levels
+        self._reindex_orders_after_shift(direction="down")
+        self._place_grid_order(side="BUY", price=self.grid_levels[0], usd_notional=self.config.base_order_notional_usd, grid_index=0)
+        self._add_event(f"Trailing roll down -> new bottom {self.grid_levels[0]}")
+
+    def _find_order_by_grid_index_and_side(self, grid_index: int, side: str) -> Optional[str]:
+        for order_id, record in self.orders.items():
+            if int(record.get("grid_index", -1)) == grid_index and str(record.get("side", "")).upper() == side:
+                return order_id
+        return None
+
+    def _reindex_orders_after_shift(self, direction: str) -> None:
+        to_remove: List[str] = []
+        for order_id, record in self.orders.items():
+            idx = int(record.get("grid_index", -1))
+            if direction == "up":
+                if idx <= 0:
+                    to_remove.append(order_id)
+                else:
+                    record["grid_index"] = idx - 1
+            else:
+                if idx >= len(self.grid_levels) - 1:
+                    to_remove.append(order_id)
+                else:
+                    record["grid_index"] = idx + 1
+        for order_id in to_remove:
+            self.orders.pop(order_id, None)
+
     def _risk_metrics(self) -> Dict[str, str]:
         candles = self._fetch_public_candles()
         closes = [c[3] for c in candles]
@@ -727,6 +827,27 @@ class GridBot:
                 self.end_headers()
                 self.wfile.write(html)
 
+            def do_POST(self) -> None:  # noqa: N802
+                if self.path != "/api/action":
+                    self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON")
+                    return
+
+                action = str(payload.get("action", "")).strip().lower()
+                result = bot._handle_dashboard_action(action=action, payload=payload)
+                body = json.dumps(result, indent=2).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
 
@@ -741,6 +862,217 @@ class GridBot:
         self._dashboard_server.shutdown()
         self._dashboard_server.server_close()
         self._dashboard_server = None
+
+    def _handle_dashboard_action(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if action == "kill_switch":
+            self._add_event("Kill switch activated from dashboard")
+            self._cancel_open_orders_batch()
+            self.stop()
+            return {"ok": True, "action": action}
+        if action == "reanchor":
+            current_price = self._get_current_price()
+            self.grid_anchor_price = current_price
+            self.grid_levels = self._build_grid_levels(current_price)
+            self._cancel_open_orders_batch()
+            self._place_initial_grid_orders(current_price)
+            self._add_event(f"Manual re-anchor at {current_price}")
+            return {"ok": True, "action": action, "anchor": str(current_price)}
+        if action == "reload_config":
+            updates = payload.get("updates", {})
+            applied = self._apply_runtime_config_updates(updates)
+            self._add_event(f"Config hot reload applied: {','.join(applied)}")
+            return {"ok": True, "action": action, "applied": applied}
+        return {"ok": False, "error": f"unsupported action {action}"}
+
+    def _apply_runtime_config_updates(self, updates: Dict[str, Any]) -> List[str]:
+        allowed = {
+            "max_btc_inventory_pct": Decimal,
+            "target_net_profit_pct": Decimal,
+            "base_order_notional_usd": Decimal,
+            "quote_reserve_pct": Decimal,
+        }
+        applied: List[str] = []
+        for key, cast in allowed.items():
+            if key not in updates:
+                continue
+            setattr(self.config, key, cast(str(updates[key])))
+            applied.append(key)
+        return applied
+
+    def _init_db(self) -> None:
+        with self._db_lock:
+            cur = self._db.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    order_id TEXT PRIMARY KEY,
+                    side TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    base_size TEXT NOT NULL,
+                    grid_index INTEGER NOT NULL,
+                    product_id TEXT NOT NULL,
+                    created_ts REAL NOT NULL,
+                    eligible_fill_ts REAL NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS fills (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    product_id TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    price TEXT NOT NULL,
+                    base_size TEXT NOT NULL,
+                    fee_paid TEXT NOT NULL,
+                    grid_index INTEGER NOT NULL,
+                    order_id TEXT NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS daily_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    product_id TEXT NOT NULL,
+                    pnl_per_1k TEXT NOT NULL,
+                    var_95_24h_pct TEXT NOT NULL,
+                    turnover_ratio TEXT NOT NULL
+                )
+            """)
+            self._db.commit()
+
+    def _save_orders_to_db(self) -> None:
+        with self._db_lock:
+            cur = self._db.cursor()
+            cur.execute("DELETE FROM orders")
+            for order_id, record in self.orders.items():
+                cur.execute(
+                    """
+                    INSERT INTO orders(order_id, side, price, base_size, grid_index, product_id, created_ts, eligible_fill_ts)
+                    VALUES(?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        order_id,
+                        str(record.get("side", "")),
+                        str(record.get("price", "0")),
+                        str(record.get("base_size", "0")),
+                        int(record.get("grid_index", 0)),
+                        str(record.get("product_id", self.config.product_id)),
+                        float(record.get("created_ts", time.time())),
+                        float(record.get("eligible_fill_ts", time.time())),
+                    ),
+                )
+            self._db.commit()
+
+    def _load_orders_from_db(self) -> Dict[str, Dict[str, Any]]:
+        with self._db_lock:
+            cur = self._db.cursor()
+            rows = cur.execute("SELECT order_id, side, price, base_size, grid_index, product_id, created_ts, eligible_fill_ts FROM orders").fetchall()
+        orders: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            orders[row[0]] = {
+                "side": row[1],
+                "price": row[2],
+                "base_size": row[3],
+                "grid_index": row[4],
+                "product_id": row[5],
+                "created_ts": row[6],
+                "eligible_fill_ts": row[7],
+            }
+        return orders
+
+    def _record_fill(self, order_id: str, record: Dict[str, Any], fill_price: Decimal) -> None:
+        fee_paid = fill_price * Decimal(str(record.get("base_size", "0"))) * self._effective_maker_fee_pct
+        with self._db_lock:
+            self._db.execute(
+                """
+                INSERT INTO fills(ts, product_id, side, price, base_size, fee_paid, grid_index, order_id)
+                VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    time.time(),
+                    self.config.product_id,
+                    str(record.get("side", "")),
+                    str(fill_price),
+                    str(record.get("base_size", "0")),
+                    str(fee_paid),
+                    int(record.get("grid_index", 0)),
+                    order_id,
+                ),
+            )
+            self._db.commit()
+
+    def _record_daily_stats_snapshot(self, current_price: Decimal) -> None:
+        usd_bal = self._get_available_balance("USD")
+        btc_bal = self._get_available_balance("BTC")
+        portfolio = usd_bal + (btc_bal * current_price if current_price > 0 else Decimal("0"))
+        capital_used = max(Decimal("1"), portfolio)
+        pnl_per_1k = (self._daily_realized_pnl / capital_used) * Decimal("1000")
+        turnover_ratio = self._daily_turnover_usd / capital_used
+        risk = self._risk_metrics()
+        with self._db_lock:
+            self._db.execute(
+                """
+                INSERT INTO daily_stats(ts, product_id, pnl_per_1k, var_95_24h_pct, turnover_ratio)
+                VALUES(?,?,?,?,?)
+                """,
+                (time.time(), self.config.product_id, str(pnl_per_1k), str(risk.get("var_95_24h_pct", "0")), str(turnover_ratio)),
+            )
+            self._db.commit()
+
+    def _migrate_orders_json_if_needed(self) -> None:
+        if self._load_orders_from_db() or not self.orders_path.exists():
+            return
+        try:
+            self.orders = json.loads(self.orders_path.read_text())
+            self._save_orders_to_db()
+        except Exception as exc:
+            logging.warning("Orders JSON migration skipped: %s", exc)
+
+    def _run_safe_start_checks(self, current_price: Decimal) -> None:
+        if not self.config.safe_start_enabled:
+            return
+        min_step_pct = (self.config.grid_band_pct * Decimal("2")) / Decimal(max(1, self.config.grid_lines - 1))
+        required = (self._effective_maker_fee_pct * Decimal("2")) + self.config.target_net_profit_pct
+        if required >= min_step_pct:
+            raise ValueError(f"Fee viability failed: required step {required:.4%} >= estimated grid step {min_step_pct:.4%}")
+
+        buy_levels = len([p for p in self.grid_levels if p < current_price])
+        sell_levels = len([p for p in self.grid_levels if p > current_price])
+        needed_usd = self.config.base_order_notional_usd * Decimal(max(1, buy_levels))
+        usd_bal = self._get_available_balance("USD")
+        if usd_bal < needed_usd:
+            raise ValueError(f"Safe-start failed: USD balance {usd_bal} < required buy-side capital {needed_usd}")
+
+        needed_btc = Decimal("0")
+        if sell_levels > 0:
+            needed_btc = (self.config.base_order_notional_usd / current_price) * Decimal(sell_levels)
+        btc_bal = self._get_available_balance("BTC")
+        if btc_bal < needed_btc:
+            if self.config.base_buy_mode == "auto":
+                shortfall = needed_btc - btc_bal
+                self._execute_base_buy(shortfall, current_price)
+            else:
+                raise ValueError(
+                    f"Safe-start failed: BTC balance {btc_bal} < required sell-side inventory {needed_btc}. "
+                    "Set BASE_BUY_MODE=auto to acquire initial base inventory."
+                )
+
+    def _execute_base_buy(self, base_size: Decimal, current_price: Decimal) -> None:
+        if base_size <= 0:
+            return
+        quote_size = self._q_price(base_size * current_price)
+        if self.config.paper_trading_mode:
+            self.paper_balances["USD"] -= quote_size
+            self.paper_balances["BTC"] += base_size
+            self._add_event(f"Auto base-buy (paper): {base_size} BTC")
+            return
+        payload = {
+            "client_order_id": str(uuid.uuid4()),
+            "product_id": self.config.product_id,
+            "side": "BUY",
+            "order_configuration": {"market_market_ioc": {"quote_size": format(quote_size, "f")}},
+        }
+        _ = self.client.create_order(**payload)
+        self._add_event(f"Auto base-buy executed for {base_size} BTC")
 
 
 def _validate_config(config: BotConfig) -> None:
@@ -782,6 +1114,10 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("DASHBOARD_PORT must be > 0")
     if config.paper_start_usd < 0 or config.paper_start_btc < 0:
         raise ValueError("PAPER_START_USD and PAPER_START_BTC must be >= 0")
+    if config.trailing_trigger_levels < 1:
+        raise ValueError("TRAILING_TRIGGER_LEVELS must be >= 1")
+    if config.base_buy_mode not in {"off", "auto"}:
+        raise ValueError("BASE_BUY_MODE must be off or auto")
 
 
 def _orders_path() -> Path:
@@ -870,38 +1206,155 @@ def _render_dashboard_html(snapshot: Dict[str, Any]) -> str:
         )
     events = "".join(f"<li>{event}</li>" for event in snapshot.get("recent_events", []))
     return f"""<!doctype html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\" />
-  <meta http-equiv=\"refresh\" content=\"10\" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="refresh" content="10" />
   <title>Thumber Trader Dashboard</title>
   <style>
-    body {{ font-family: Arial, sans-serif; margin: 24px; background:#111; color:#e6e6e6; }}
-    .grid {{ display:grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:16px; }}
-    .card {{ background:#1d1d1d; padding:12px; border-radius:8px; }}
-    table {{ width:100%; border-collapse: collapse; font-size:14px; }}
-    td, th {{ border-bottom:1px solid #333; padding:8px; text-align:left; }}
+    :root {{
+      --bg: #0b1220;
+      --panel: #121a2b;
+      --panel-soft: #1a2439;
+      --border: #2d3a58;
+      --text: #e8eefc;
+      --muted: #93a0bf;
+      --accent: #4f8cff;
+      --danger: #d95f5f;
+      --success: #3fb27f;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+      margin: 0;
+      background: radial-gradient(circle at top, #14213a 0%, var(--bg) 48%);
+      color: var(--text);
+      line-height: 1.4;
+    }}
+    .container {{ max-width: 1120px; margin: 24px auto; padding: 0 16px 24px; }}
+    .header {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }}
+    h1, h2 {{ margin: 0; }}
+    .muted {{ color: var(--muted); }}
+    .badge {{ background: var(--panel-soft); border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; font-size: 12px; color: var(--muted); }}
+    .grid {{ display:grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin: 14px 0 18px; }}
+    .card {{ background: linear-gradient(180deg, #16223a 0%, var(--panel) 100%); border: 1px solid var(--border); padding: 12px; border-radius: 10px; box-shadow: 0 8px 20px rgba(0,0,0,0.22); }}
+    .k {{ font-size: 12px; color: var(--muted); margin-bottom: 6px; }}
+    .v {{ font-size: 18px; font-weight: 600; }}
+    .section {{ margin-top: 18px; }}
+    .section-header {{ display:flex; align-items:center; justify-content:space-between; gap: 10px; margin-bottom: 8px; }}
+    .section-links a {{ color: var(--accent); text-decoration: none; font-size: 12px; margin-left: 10px; }}
+    .section-links a:hover {{ text-decoration: underline; }}
+    .table-wrap {{ max-height: 300px; overflow: auto; border-radius: 10px; }}
+    table {{ width:100%; border-collapse: collapse; font-size:14px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }}
+    td, th {{ border-bottom:1px solid var(--border); padding:10px 12px; text-align:left; }}
+    th {{ color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }}
+    tr:hover td {{ background: rgba(79, 140, 255, 0.06); }}
+    .controls {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }}
+    .control-item {{ background: var(--panel-soft); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }}
+    .control-item p {{ margin: 6px 0 0; font-size: 12px; color: var(--muted); }}
+    button {{ width: 100%; border: 1px solid transparent; border-radius: 8px; padding: 10px 12px; color: white; font-weight: 600; cursor: pointer; }}
+    button:hover {{ filter: brightness(1.08); }}
+    .btn-danger {{ background: var(--danger); }}
+    .btn-primary {{ background: var(--accent); }}
+    .btn-neutral {{ background: #5f6f95; }}
+    #action-status {{ display: none; margin-top: 12px; padding: 10px; border-radius: 8px; font-size: 13px; }}
+    #action-status.ok {{ display: block; background: rgba(63,178,127,.15); border: 1px solid rgba(63,178,127,.45); color: #b9f0d6; }}
+    #action-status.err {{ display: block; background: rgba(217,95,95,.15); border: 1px solid rgba(217,95,95,.45); color: #ffd1d1; }}
+    ul {{ margin-top: 10px; }}
   </style>
 </head>
 <body>
-  <h1>Thumber Trader Dashboard</h1>
-  <p>Mode: <strong>{'PAPER' if snapshot.get('paper_trading_mode') else 'LIVE'}</strong></p>
-  <div class=\"grid\">
-    <div class=\"card\"><div>Product</div><strong>{snapshot.get('product_id')}</strong></div>
-    <div class=\"card\"><div>Last Price</div><strong>{snapshot.get('last_price')}</strong></div>
-    <div class=\"card\"><div>Trend</div><strong>{snapshot.get('trend_bias')}</strong></div>
-    <div class=\"card\"><div>Portfolio (USD)</div><strong>{snapshot.get('portfolio_value_usd')}</strong></div>
-    <div class=\"card\"><div>Active Orders</div><strong>{snapshot.get('active_orders')}</strong></div>
-    <div class=\"card\"><div>Fills</div><strong>{snapshot.get('fills')}</strong></div>
+  <div class="container">
+    <div class="header">
+      <h1>Thumber Trader Dashboard</h1>
+      <span class="badge">Mode: <strong>{'PAPER' if snapshot.get('paper_trading_mode') else 'LIVE'}</strong></span>
+    </div>
+    <p class="muted">Operational control panel for monitoring open grid orders and runtime bot health.</p>
+
+    <div class="grid">
+      <div class="card"><div class="k">Product</div><div class="v">{snapshot.get('product_id')}</div></div>
+      <div class="card"><div class="k">Last Price</div><div class="v">{snapshot.get('last_price')}</div></div>
+      <div class="card"><div class="k">Trend</div><div class="v">{snapshot.get('trend_bias')}</div></div>
+      <div class="card"><div class="k">Portfolio (USD)</div><div class="v">{snapshot.get('portfolio_value_usd')}</div></div>
+      <div class="card"><div class="k">Active Orders</div><div class="v">{snapshot.get('active_orders')}</div></div>
+      <div class="card"><div class="k">Fills</div><div class="v">{snapshot.get('fills')}</div></div>
+    </div>
+
+    <div class="section" id="controls">
+      <div class="section-header">
+        <h2>Controls</h2>
+        <div class="section-links"><a href="#open-orders">Jump to Open Orders</a><a href="#recent-events">Jump to Recent Events</a></div>
+      </div>
+      <div class="controls">
+        <div class="control-item">
+          <button class="btn-danger" title="Cancel all active orders and stop the bot loop immediately" onclick="sendAction('kill_switch')">Emergency Kill Switch</button>
+          <p>Immediately cancel all open orders and halt execution.</p>
+        </div>
+        <div class="control-item">
+          <button class="btn-primary" title="Rebuild the full grid around current market price" onclick="sendAction('reanchor')">Manual Re-anchor</button>
+          <p>Re-center grid levels to current market and republish orders.</p>
+        </div>
+        <div class="control-item">
+          <button class="btn-neutral" title="Change selected runtime limits without restarting the service" onclick="reloadConfig()">Hot Reload Config</button>
+          <p>Update selected risk and profit knobs while bot is running.</p>
+        </div>
+      </div>
+      <div id="action-status" aria-live="polite"></div>
+    </div>
+
+    <div class="section" id="open-orders">
+      <div class="section-header"><h2>Open Orders</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Order ID</th><th>Side</th><th>Price</th><th>Base Size</th><th>Grid Index</th></tr></thead>
+          <tbody>{''.join(rows)}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section" id="recent-events">
+      <h2>Recent Events</h2>
+      <ul>{events}</ul>
+      <p><a href="/api/status">JSON API</a></p>
+    </div>
   </div>
-  <h2>Open Orders</h2>
-  <table>
-    <thead><tr><th>Order ID</th><th>Side</th><th>Price</th><th>Base Size</th><th>Grid Index</th></tr></thead>
-    <tbody>{''.join(rows)}</tbody>
-  </table>
-  <h2>Recent Events</h2>
-  <ul>{events}</ul>
-  <p><a href=\"/api/status\">JSON API</a></p>
+
+  <script>
+    function renderStatus(msg, ok=true) {{
+      const el = document.getElementById('action-status');
+      el.className = ok ? 'ok' : 'err';
+      el.textContent = msg;
+    }}
+
+    async function sendAction(action, updates) {{
+      try {{
+        const resp = await fetch('/api/action', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{action, updates}})
+        }});
+        const data = await resp.json();
+        const ok = Boolean(data.ok);
+        renderStatus(ok ? `Action "${{action}}" completed.` : (data.error || 'Action failed'), ok);
+      }} catch (err) {{
+        renderStatus(`Request failed: ${{err}}`, false);
+      }}
+    }}
+
+    function reloadConfig() {{
+      const target = prompt('TARGET_NET_PROFIT_PCT override (blank to skip):', '0.002');
+      const cap = prompt('MAX_BTC_INVENTORY_PCT override (blank to skip):', '0.65');
+      const updates = {{}};
+      if (target) updates.target_net_profit_pct = target;
+      if (cap) updates.max_btc_inventory_pct = cap;
+      if (Object.keys(updates).length === 0) {{
+        renderStatus('No config changes were provided.', false);
+        return;
+      }}
+      sendAction('reload_config', updates);
+    }}
+  </script>
 </body>
 </html>"""
 
