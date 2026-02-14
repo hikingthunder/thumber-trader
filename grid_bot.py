@@ -84,6 +84,12 @@ class BotConfig:
     trend_ema_fast: int = int(os.getenv("TREND_EMA_FAST", "9"))
     trend_ema_slow: int = int(os.getenv("TREND_EMA_SLOW", "21"))
     trend_strength_threshold: Decimal = Decimal(os.getenv("TREND_STRENGTH_THRESHOLD", "0.003"))
+    adx_period: int = int(os.getenv("ADX_PERIOD", "14"))
+    adx_ranging_threshold: Decimal = Decimal(os.getenv("ADX_RANGING_THRESHOLD", "20"))
+    adx_trending_threshold: Decimal = Decimal(os.getenv("ADX_TRENDING_THRESHOLD", "25"))
+    adx_range_band_multiplier: Decimal = Decimal(os.getenv("ADX_RANGE_BAND_MULTIPLIER", "0.8"))
+    adx_trend_band_multiplier: Decimal = Decimal(os.getenv("ADX_TREND_BAND_MULTIPLIER", "1.25"))
+    adx_trend_order_size_multiplier: Decimal = Decimal(os.getenv("ADX_TREND_ORDER_SIZE_MULTIPLIER", "0.7"))
     dynamic_inventory_cap_enabled: bool = os.getenv("DYNAMIC_INVENTORY_CAP_ENABLED", "false").strip().lower() in {
         "1",
         "true",
@@ -179,6 +185,8 @@ class GridBot:
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._cached_trend_strength = Decimal("0")
         self._cached_atr_pct = Decimal("0")
+        self._cached_adx = Decimal("0")
+        self._market_regime = "UNKNOWN"
         self._active_inventory_cap_pct = self.config.max_btc_inventory_pct
         self.paper_balances = {
             "USD": self.config.paper_start_usd,
@@ -410,16 +418,18 @@ class GridBot:
         return levels
 
     def _effective_grid_band_pct(self, current_price: Decimal) -> Decimal:
+        regime_band_multiplier = self._regime_band_multiplier()
         if not self.config.atr_enabled:
-            return self.config.grid_band_pct
+            return self.config.grid_band_pct * regime_band_multiplier
 
         candles = self._fetch_public_candles()
         atr = _atr(candles, self.config.atr_period)
         if atr <= 0:
-            return self.config.grid_band_pct
+            return self.config.grid_band_pct * regime_band_multiplier
 
         dynamic_pct = (atr * self.config.atr_band_multiplier) / current_price
-        return max(self.config.atr_min_band_pct, min(dynamic_pct, self.config.atr_max_band_pct))
+        atr_band = max(self.config.atr_min_band_pct, min(dynamic_pct, self.config.atr_max_band_pct))
+        return atr_band * regime_band_multiplier
 
     def _place_initial_grid_orders(self, current_price: Decimal) -> None:
         trend_bias = self._get_trend_bias()
@@ -437,7 +447,7 @@ class GridBot:
         base_available = self._get_available_balance(self.base_currency)
         deployable_usd = usd_available * (Decimal("1") - self.config.quote_reserve_pct)
 
-        buy_budget_per_order = max(self.config.min_notional_usd, self.config.base_order_notional_usd)
+        buy_budget_per_order = self._regime_adjusted_buy_notional(self.config.base_order_notional_usd)
         max_buys = int(deployable_usd // buy_budget_per_order)
         buy_levels = buy_levels[:max_buys] if max_buys >= 0 else []
 
@@ -486,7 +496,7 @@ class GridBot:
                     logging.info("Sell filled at %s in downtrend; preserving capital (skip replacement buy).", fill_price)
                     continue
                 new_price = self.grid_levels[grid_index - 1]
-                usd_notional = max(self.config.min_notional_usd, Decimal(str(record["base_size"])) * fill_price)
+                usd_notional = self._regime_adjusted_buy_notional(Decimal(str(record["base_size"])) * fill_price)
                 new_id = self._place_grid_order(side="BUY", price=new_price, usd_notional=usd_notional, grid_index=grid_index - 1)
                 if new_id:
                     logging.info("Sell Filled at $%s! Placed Buy at $%s.", fill_price, new_price)
@@ -645,6 +655,8 @@ class GridBot:
         candles = self._fetch_public_candles()
         closes = [c[3] for c in candles]
         self._cached_atr_pct = self._estimate_atr_pct(candles)
+        self._cached_adx = _adx(candles, self.config.adx_period)
+        self._market_regime = self._classify_market_regime(self._cached_adx)
         if len(closes) < max(self.config.trend_ema_fast, self.config.trend_ema_slow):
             logging.info("Trend data unavailable/insufficient; using NEUTRAL bias.")
             self._cached_trend_strength = Decimal("0")
@@ -692,6 +704,26 @@ class GridBot:
     def ranging_score(self) -> Decimal:
         trend_strength = abs(self._cached_trend_strength)
         return max(Decimal("0"), self._cached_atr_pct - trend_strength)
+
+    def _classify_market_regime(self, adx_value: Decimal) -> str:
+        if adx_value >= self.config.adx_trending_threshold:
+            return "TRENDING"
+        if adx_value <= self.config.adx_ranging_threshold:
+            return "RANGING"
+        return "TRANSITION"
+
+    def _regime_band_multiplier(self) -> Decimal:
+        if self._market_regime == "TRENDING":
+            return self.config.adx_trend_band_multiplier
+        if self._market_regime == "RANGING":
+            return self.config.adx_range_band_multiplier
+        return Decimal("1")
+
+    def _regime_adjusted_buy_notional(self, usd_notional: Decimal) -> Decimal:
+        adjusted = usd_notional
+        if self._market_regime == "TRENDING":
+            adjusted = usd_notional * self.config.adx_trend_order_size_multiplier
+        return max(self.config.min_notional_usd, adjusted)
 
     def _fetch_public_candles(self) -> List[Tuple[int, Decimal, Decimal, Decimal]]:
         params = urllib.parse.urlencode(
@@ -993,6 +1025,8 @@ class GridBot:
                 "portfolio_value_usd": str(portfolio),
                 "inventory_cap_pct": str(self._active_inventory_cap_pct),
                 "trend_strength": str(self._cached_trend_strength),
+                "adx": str(self._cached_adx),
+                "market_regime": self._market_regime,
                 "atr_pct": str(self._cached_atr_pct),
                 "ranging_score": str(self.ranging_score()),
                 "maker_fee_pct": str(self._effective_maker_fee_pct),
@@ -1495,6 +1529,16 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("ATR_MIN_BAND_PCT and ATR_MAX_BAND_PCT must satisfy 0 < min <= max < 1")
     if config.bracket_take_profit_pct < 0 or config.bracket_stop_loss_pct < 0:
         raise ValueError("Bracket TP/SL percentages must be >= 0")
+    if config.adx_period <= 1:
+        raise ValueError("ADX_PERIOD must be > 1")
+    if config.adx_ranging_threshold < 0 or config.adx_trending_threshold < 0:
+        raise ValueError("ADX thresholds must be >= 0")
+    if config.adx_ranging_threshold >= config.adx_trending_threshold:
+        raise ValueError("ADX_RANGING_THRESHOLD must be less than ADX_TRENDING_THRESHOLD")
+    if config.adx_range_band_multiplier <= 0 or config.adx_trend_band_multiplier <= 0:
+        raise ValueError("ADX band multipliers must be > 0")
+    if config.adx_trend_order_size_multiplier <= 0:
+        raise ValueError("ADX_TREND_ORDER_SIZE_MULTIPLIER must be > 0")
     if config.base_order_notional_usd <= 0:
         raise ValueError("BASE_ORDER_NOTIONAL_USD must be > 0")
     if config.min_notional_usd <= 0:
@@ -1596,6 +1640,68 @@ def _atr(candles: List[Tuple[int, Decimal, Decimal, Decimal]], period: int) -> D
     if len(true_ranges) < period:
         return Decimal("0")
     return sum(true_ranges[-period:], Decimal("0")) / Decimal(period)
+
+def _adx(candles: List[Tuple[int, Decimal, Decimal, Decimal]], period: int) -> Decimal:
+    if period <= 1 or len(candles) < (period * 2):
+        return Decimal("0")
+
+    plus_dm_values: List[Decimal] = []
+    minus_dm_values: List[Decimal] = []
+    tr_values: List[Decimal] = []
+
+    prev_high = candles[0][1]
+    prev_low = candles[0][2]
+    prev_close = candles[0][3]
+
+    for _ts, high, low, close in candles[1:]:
+        up_move = high - prev_high
+        down_move = prev_low - low
+
+        plus_dm = up_move if up_move > down_move and up_move > 0 else Decimal("0")
+        minus_dm = down_move if down_move > up_move and down_move > 0 else Decimal("0")
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+
+        plus_dm_values.append(plus_dm)
+        minus_dm_values.append(minus_dm)
+        tr_values.append(tr)
+
+        prev_high = high
+        prev_low = low
+        prev_close = close
+
+    if len(tr_values) < period:
+        return Decimal("0")
+
+    atr = sum(tr_values[:period], Decimal("0"))
+    plus_dm_smoothed = sum(plus_dm_values[:period], Decimal("0"))
+    minus_dm_smoothed = sum(minus_dm_values[:period], Decimal("0"))
+
+    dx_values: List[Decimal] = []
+
+    def _append_dx(current_atr: Decimal, current_plus_dm: Decimal, current_minus_dm: Decimal) -> None:
+        if current_atr <= 0:
+            return
+        plus_di = (current_plus_dm / current_atr) * Decimal("100")
+        minus_di = (current_minus_dm / current_atr) * Decimal("100")
+        denominator = plus_di + minus_di
+        if denominator <= 0:
+            return
+        dx_values.append((abs(plus_di - minus_di) / denominator) * Decimal("100"))
+
+    _append_dx(atr, plus_dm_smoothed, minus_dm_smoothed)
+
+    for idx in range(period, len(tr_values)):
+        atr = atr - (atr / Decimal(period)) + tr_values[idx]
+        plus_dm_smoothed = plus_dm_smoothed - (plus_dm_smoothed / Decimal(period)) + plus_dm_values[idx]
+        minus_dm_smoothed = minus_dm_smoothed - (minus_dm_smoothed / Decimal(period)) + minus_dm_values[idx]
+        _append_dx(atr, plus_dm_smoothed, minus_dm_smoothed)
+
+    if not dx_values:
+        return Decimal("0")
+
+    lookback = min(period, len(dx_values))
+    return sum(dx_values[-lookback:], Decimal("0")) / Decimal(lookback)
+
 
 def _read_secret(var_name: str, file_var_name: str) -> Optional[str]:
     direct = os.getenv(var_name)

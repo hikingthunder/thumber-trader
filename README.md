@@ -24,6 +24,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, and Coinbase API latency histogram.
 - Applies risk controls (USD reserve, BTC inventory cap, stop-loss awareness).
 - Adds trend bias (EMA fast/slow over Coinbase candles) to be more defensive in downtrends.
+- Detects market regime via ADX and auto-adjusts grid width + buy order notional for trending vs ranging conditions.
 
 ## 1) Debian 13 / Proxmox LXC setup
 
@@ -150,6 +151,14 @@ TREND_CANDLE_LIMIT=72
 TREND_EMA_FAST=9
 TREND_EMA_SLOW=21
 TREND_STRENGTH_THRESHOLD=0.003
+
+# Market regime guardrail (ADX)
+ADX_PERIOD=14
+ADX_RANGING_THRESHOLD=20
+ADX_TRENDING_THRESHOLD=25
+ADX_RANGE_BAND_MULTIPLIER=0.8
+ADX_TREND_BAND_MULTIPLIER=1.25
+ADX_TREND_ORDER_SIZE_MULTIPLIER=0.7
 
 STATE_DB_PATH=/opt/thumber-trader/grid_state.db
 # Optional legacy mirror for old tooling (disabled by default)
