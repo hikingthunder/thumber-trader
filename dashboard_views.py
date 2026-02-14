@@ -16,11 +16,10 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
     events = "".join(f"<li>{html.escape(str(event))}</li>" for event in snapshot.get("recent_events", []))
 
     return f"""<!doctype html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <meta http-equiv=\"refresh\" content=\"10\" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Thumber Trader Dashboard</title>
   <style>
     body {{ font-family: Inter, Arial, sans-serif; margin:0; background:#0b1220; color:#e8eefc; }}
@@ -36,32 +35,79 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
   </style>
 </head>
 <body>
-  <div class=\"container\">
+  <div class="container">
     <h1>Thumber Trader Dashboard</h1>
-    <p class=\"muted\">Live runtime status and controls.</p>
+    <p class="muted">Live runtime status and controls.</p>
 
-    <div class=\"card grid\">
-      <div><div class=\"k\">Product</div><div class=\"v\">{snapshot.get('product_id')}</div></div>
-      <div><div class=\"k\">Last Price</div><div class=\"v\">{snapshot.get('last_price')}</div></div>
-      <div><div class=\"k\">Trend</div><div class=\"v\">{snapshot.get('trend_bias')}</div></div>
-      <div><div class=\"k\">Portfolio (USD)</div><div class=\"v\">{snapshot.get('portfolio_value_usd')}</div></div>
-      <div><div class=\"k\">Active Orders</div><div class=\"v\">{snapshot.get('active_orders')}</div></div>
-      <div><div class=\"k\">Fills</div><div class=\"v\">{snapshot.get('fills')}</div></div>
+    <div class="card grid">
+      <div><div class="k">Product</div><div class="v" id="product-id">{snapshot.get('product_id')}</div></div>
+      <div><div class="k">Last Price</div><div class="v" id="last-price">{snapshot.get('last_price')}</div></div>
+      <div><div class="k">Trend</div><div class="v" id="trend-bias">{snapshot.get('trend_bias')}</div></div>
+      <div><div class="k">Portfolio (USD)</div><div class="v" id="portfolio-value-usd">{snapshot.get('portfolio_value_usd')}</div></div>
+      <div><div class="k">Active Orders</div><div class="v" id="active-orders">{snapshot.get('active_orders')}</div></div>
+      <div><div class="k">Fills</div><div class="v" id="fills">{snapshot.get('fills')}</div></div>
     </div>
 
-    <div class=\"card\">
-      <button class=\"danger\" onclick=\"sendAction('kill_switch')\">Emergency Kill Switch</button>
-      <button class=\"primary\" onclick=\"sendAction('reanchor')\">Manual Re-anchor</button>
-      <button class=\"primary\" onclick=\"openConfigWindow()\">Open Configuration</button>
-      <a class=\"btn primary\" href=\"/config\">Open Config Page</a>
-      <div id=\"action-status\" aria-live=\"polite\"></div>
+    <div class="card">
+      <button class="danger" onclick="sendAction('kill_switch')">Emergency Kill Switch</button>
+      <button class="primary" onclick="sendAction('reanchor')">Manual Re-anchor</button>
+      <button class="primary" onclick="openConfigWindow()">Open Configuration</button>
+      <a class="btn primary" href="/config">Open Config Page</a>
+      <div id="action-status" aria-live="polite"></div>
     </div>
 
-    <div class=\"card\"><h2>Open Orders</h2><table><thead><tr><th>Order ID</th><th>Side</th><th>Price</th><th>Base Size</th><th>Grid Index</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
-    <div class=\"card\"><h2>Recent Events</h2><ul>{events}</ul><p><a style=\"color:#4f8cff\" href=\"/api/status\">JSON API</a> · <a style=\"color:#4f8cff\" href=\"/api/tax_report.csv\">Tax CSV</a></p></div>
+    <div class="card"><h2>Open Orders</h2><table><thead><tr><th>Order ID</th><th>Side</th><th>Price</th><th>Base Size</th><th>Grid Index</th></tr></thead><tbody id="orders-body">{''.join(rows)}</tbody></table></div>
+    <div class="card"><h2>Recent Events</h2><ul id="recent-events">{events}</ul><p><a style="color:#4f8cff" href="/api/status">JSON API</a> · <a style="color:#4f8cff" href="/api/tax_report.csv">Tax CSV</a></p></div>
   </div>
 
   <script>
+    function escapeHtml(value) {{
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }}
+    function applySnapshot(snapshot) {{
+      const setText = (id, value) => {{
+        const el = document.getElementById(id);
+        if (el) el.textContent = value ?? '';
+      }};
+      setText('product-id', snapshot.product_id);
+      setText('last-price', snapshot.last_price);
+      setText('trend-bias', snapshot.trend_bias);
+      setText('portfolio-value-usd', snapshot.portfolio_value_usd);
+      setText('active-orders', snapshot.active_orders);
+      setText('fills', snapshot.fills);
+
+      const ordersBody = document.getElementById('orders-body');
+      if (ordersBody) {{
+        const rows = Object.entries(snapshot.orders || {{}}).map(([oid, order]) =>
+          `<tr><td>${{escapeHtml(oid)}}</td><td>${{escapeHtml(order?.side)}}</td><td>${{escapeHtml(order?.price)}}</td><td>${{escapeHtml(order?.base_size)}}</td><td>${{escapeHtml(order?.grid_index)}}</td></tr>`
+        );
+        ordersBody.innerHTML = rows.join('');
+      }}
+
+      const recentEvents = document.getElementById('recent-events');
+      if (recentEvents) {{
+        const events = (snapshot.recent_events || []).map((event) => `<li>${{escapeHtml(event)}}</li>`);
+        recentEvents.innerHTML = events.join('');
+      }}
+    }}
+    function connectEventStream() {{
+      const source = new EventSource('/api/stream');
+      source.onmessage = (event) => {{
+        try {{
+          applySnapshot(JSON.parse(event.data));
+        }} catch (_err) {{}}
+      }};
+      source.onerror = () => {{
+        source.close();
+        setTimeout(connectEventStream, 1000);
+      }};
+    }}
+
     function renderStatus(msg, ok=true) {{
       const el = document.getElementById('action-status');
       el.style.color = ok ? '#b9f0d6' : '#ffd1d1';
@@ -78,9 +124,12 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
       const popup = window.open('/config?popup=1', 'thumber-config', 'width=980,height=820');
       if (!popup) window.location.href = '/config';
     }}
+
+    connectEventStream();
   </script>
 </body>
 </html>"""
+
 
 
 def render_config_html(snapshot: Dict[str, Any], popup_mode: bool = False) -> str:
