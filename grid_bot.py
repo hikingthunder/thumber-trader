@@ -15,6 +15,7 @@ import logging
 import os
 import signal
 import sqlite3
+import argparse
 import stat
 import threading
 import time
@@ -28,7 +29,6 @@ from decimal import Decimal, ROUND_DOWN, getcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from coinbase.rest import RESTClient
 
 getcontext().prec = 28
 
@@ -104,6 +104,12 @@ class BotConfig:
 
     # persistence
     state_db_path: str = os.getenv("STATE_DB_PATH", "grid_state.db")
+    legacy_orders_json_enabled: bool = os.getenv("LEGACY_ORDERS_JSON_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     # safe start
     safe_start_enabled: bool = os.getenv("SAFE_START_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -111,7 +117,7 @@ class BotConfig:
 
 
 class GridBot:
-    def __init__(self, client: RESTClient, config: BotConfig, orders_path: Path):
+    def __init__(self, client: Any, config: BotConfig, orders_path: Path):
         self.client = client
         self.config = config
         self.orders_path = orders_path
@@ -575,11 +581,12 @@ class GridBot:
 
     def _save_orders(self) -> None:
         self._save_orders_to_db()
-        self.orders_path.write_text(json.dumps(self.orders, indent=2, sort_keys=True))
-        try:
-            self.orders_path.chmod(0o600)
-        except Exception:
-            pass
+        if self.config.legacy_orders_json_enabled:
+            self.orders_path.write_text(json.dumps(self.orders, indent=2, sort_keys=True))
+            try:
+                self.orders_path.chmod(0o600)
+            except Exception:
+                pass
 
 
 
@@ -801,12 +808,54 @@ class GridBot:
                 "orders": self.orders,
             }
 
+    def _tax_report_csv(self, year: Optional[int] = None) -> str:
+        rows = self._fetch_fills(year=year)
+        lines = ["ts_iso,product_id,side,price,base_size,gross_notional_usd,fee_paid_usd,net_notional_usd,order_id,grid_index"]
+        for row in rows:
+            ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(row[0])))
+            price = Decimal(str(row[3]))
+            base_size = Decimal(str(row[4]))
+            gross = price * base_size
+            fee = Decimal(str(row[5]))
+            net = gross - fee if str(row[2]).upper() == "SELL" else gross + fee
+            lines.append(
+                ",".join(
+                    [
+                        ts_iso,
+                        str(row[1]),
+                        str(row[2]),
+                        str(row[3]),
+                        str(row[4]),
+                        str(gross),
+                        str(row[5]),
+                        str(net),
+                        str(row[6]),
+                        str(row[7]),
+                    ]
+                )
+            )
+        return "\n".join(lines) + "\n"
+
+    def _fetch_fills(self, year: Optional[int] = None) -> List[Tuple[Any, ...]]:
+        query = "SELECT ts, product_id, side, price, base_size, fee_paid, order_id, grid_index FROM fills"
+        params: Tuple[Any, ...] = ()
+        if year is not None:
+            start_ts = time.mktime(time.strptime(f"{year}-01-01", "%Y-%m-%d"))
+            end_ts = time.mktime(time.strptime(f"{year + 1}-01-01", "%Y-%m-%d"))
+            query += " WHERE ts >= ? AND ts < ?"
+            params = (start_ts, end_ts)
+        query += " ORDER BY ts ASC"
+        with self._db_lock:
+            cur = self._db.cursor()
+            return cur.execute(query, params).fetchall()
+
     def _start_dashboard_server(self) -> None:
         bot = self
 
         class DashboardHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
-                if self.path == "/api/status":
+                parsed = urllib.parse.urlparse(self.path)
+                if parsed.path == "/api/status":
                     payload = json.dumps(bot._status_snapshot(), indent=2).encode("utf-8")
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -815,7 +864,25 @@ class GridBot:
                     self.wfile.write(payload)
                     return
 
-                if self.path != "/":
+                if parsed.path == "/api/tax_report.csv":
+                    year = None
+                    params = urllib.parse.parse_qs(parsed.query)
+                    if "year" in params and params["year"]:
+                        try:
+                            year = int(params["year"][0])
+                        except ValueError:
+                            self.send_error(HTTPStatus.BAD_REQUEST, "year must be an integer")
+                            return
+                    payload = bot._tax_report_csv(year=year).encode("utf-8")
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/csv; charset=utf-8")
+                    self.send_header("Content-Disposition", "attachment; filename=tax_report.csv")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+
+                if parsed.path != "/":
                     self.send_error(HTTPStatus.NOT_FOUND, "Not found")
                     return
 
@@ -1124,6 +1191,50 @@ def _orders_path() -> Path:
     return Path(os.getenv("ORDERS_PATH", "orders.json"))
 
 
+def export_tax_report_csv(db_path: str, output_path: Path, year: Optional[int] = None) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        query = "SELECT ts, product_id, side, price, base_size, fee_paid, order_id, grid_index FROM fills"
+        params: Tuple[Any, ...] = ()
+        if year is not None:
+            start_ts = time.mktime(time.strptime(f"{year}-01-01", "%Y-%m-%d"))
+            end_ts = time.mktime(time.strptime(f"{year + 1}-01-01", "%Y-%m-%d"))
+            query += " WHERE ts >= ? AND ts < ?"
+            params = (start_ts, end_ts)
+        query += " ORDER BY ts ASC"
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    lines = ["ts_iso,product_id,side,price,base_size,gross_notional_usd,fee_paid_usd,net_notional_usd,order_id,grid_index"]
+    for row in rows:
+        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(row[0])))
+        price = Decimal(str(row[3]))
+        base_size = Decimal(str(row[4]))
+        gross = price * base_size
+        fee = Decimal(str(row[5]))
+        net = gross - fee if str(row[2]).upper() == "SELL" else gross + fee
+        lines.append(
+            ",".join(
+                [
+                    ts_iso,
+                    str(row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                    str(row[4]),
+                    str(gross),
+                    str(row[5]),
+                    str(net),
+                    str(row[6]),
+                    str(row[7]),
+                ]
+            )
+        )
+
+    output_path.write_text("\n".join(lines) + "\n")
+    return len(rows)
+
+
 def _ema(values: List[Decimal], period: int) -> Decimal:
     if period <= 0 or len(values) < period:
         return Decimal("0")
@@ -1316,7 +1427,7 @@ def _render_dashboard_html(snapshot: Dict[str, Any]) -> str:
     <div class="section" id="recent-events">
       <h2>Recent Events</h2>
       <ul>{events}</ul>
-      <p><a href="/api/status">JSON API</a></p>
+      <p><a href="/api/status">JSON API</a> · <a href="/api/tax_report.csv">Tax CSV</a></p>
     </div>
   </div>
 
@@ -1359,21 +1470,34 @@ def _render_dashboard_html(snapshot: Dict[str, Any]) -> str:
 </html>"""
 
 
-def build_client() -> RESTClient:
+def build_client() -> Any:
     api_key = _read_secret("COINBASE_API_KEY", "COINBASE_API_KEY_FILE")
     api_secret = _read_secret("COINBASE_API_SECRET", "COINBASE_API_SECRET_FILE")
     if not api_key or not api_secret:
         raise EnvironmentError(
             "Set COINBASE_API_KEY/COINBASE_API_SECRET (or *_FILE variants with chmod 600)."
         )
+    from coinbase.rest import RESTClient
+
     return RESTClient(api_key=api_key, api_secret=api_secret)
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Thumber Trader grid bot")
+    parser.add_argument("--export-tax-report", dest="export_tax_report", type=Path, help="write fills tax CSV to this path")
+    parser.add_argument("--tax-year", dest="tax_year", type=int, help="optional tax year filter for CSV export")
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-    client = build_client()
     config = BotConfig()
     _validate_config(config)
+
+    if args.export_tax_report:
+        count = export_tax_report_csv(config.state_db_path, args.export_tax_report, year=args.tax_year)
+        logging.info("Exported %s fills to %s", count, args.export_tax_report)
+        return
+
+    client = build_client()
     bot = GridBot(client, config, _orders_path())
 
     def _handle_signal(signum: int, _frame: Any) -> None:
