@@ -29,8 +29,13 @@ from decimal import Decimal, ROUND_DOWN, getcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from config_schema import CONFIG_FIELDS
+from dashboard_views import render_config_html, render_dashboard_home_html
+
 
 getcontext().prec = 28
+
+
 
 
 
@@ -806,6 +811,7 @@ class GridBot:
                 "risk_metrics": risk,
                 "recent_events": list(self.recent_events),
                 "orders": self.orders,
+                "config": self._config_snapshot(),
             }
 
     def _tax_report_csv(self, year: Optional[int] = None) -> str:
@@ -849,6 +855,25 @@ class GridBot:
             cur = self._db.cursor()
             return cur.execute(query, params).fetchall()
 
+    def _config_snapshot(self) -> Dict[str, str]:
+        snapshot: Dict[str, str] = {}
+        for field in CONFIG_FIELDS:
+            value = getattr(self.config, field["attr"])
+            snapshot[field["env"]] = str(value)
+        return snapshot
+
+    def _parse_config_value(self, raw_value: str, value_type: str) -> Any:
+        value = raw_value.strip()
+        if value_type == "str":
+            return value
+        if value_type == "int":
+            return int(value)
+        if value_type == "decimal":
+            return Decimal(value)
+        if value_type == "bool":
+            return value.lower() in {"1", "true", "yes", "on"}
+        raise ValueError(f"Unsupported config type: {value_type}")
+
     def _start_dashboard_server(self) -> None:
         bot = self
 
@@ -882,12 +907,24 @@ class GridBot:
                     self.wfile.write(payload)
                     return
 
+                if parsed.path == "/config":
+                    snapshot = bot._status_snapshot()
+                    params = urllib.parse.parse_qs(parsed.query)
+                    popup_mode = params.get("popup", ["0"])[0] in {"1", "true", "yes", "on"}
+                    html_page = render_config_html(snapshot, popup_mode=popup_mode).encode("utf-8")
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(html_page)))
+                    self.end_headers()
+                    self.wfile.write(html_page)
+                    return
+
                 if parsed.path != "/":
                     self.send_error(HTTPStatus.NOT_FOUND, "Not found")
                     return
 
                 snapshot = bot._status_snapshot()
-                html = _render_dashboard_html(snapshot).encode("utf-8")
+                html = render_dashboard_home_html(snapshot).encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(html)))
@@ -949,22 +986,64 @@ class GridBot:
             applied = self._apply_runtime_config_updates(updates)
             self._add_event(f"Config hot reload applied: {','.join(applied)}")
             return {"ok": True, "action": action, "applied": applied}
+        if action == "save_config":
+            updates = payload.get("updates", {})
+            env_path = str(payload.get("env_path", os.getenv("BOT_ENV_PATH", ".env"))).strip() or ".env"
+            saved = self._save_config_updates(Path(env_path), updates)
+            self._add_event(f"Config file updated: {','.join(saved)}")
+            return {"ok": True, "action": action, "saved": saved, "env_path": env_path}
         return {"ok": False, "error": f"unsupported action {action}"}
 
     def _apply_runtime_config_updates(self, updates: Dict[str, Any]) -> List[str]:
-        allowed = {
-            "max_btc_inventory_pct": Decimal,
-            "target_net_profit_pct": Decimal,
-            "base_order_notional_usd": Decimal,
-            "quote_reserve_pct": Decimal,
-        }
         applied: List[str] = []
-        for key, cast in allowed.items():
-            if key not in updates:
+        field_map = {f["env"]: f for f in CONFIG_FIELDS}
+        for env_name, raw in updates.items():
+            field = field_map.get(env_name)
+            if field is None:
                 continue
-            setattr(self.config, key, cast(str(updates[key])))
-            applied.append(key)
+            parsed = self._parse_config_value(str(raw), field["type"])
+            setattr(self.config, field["attr"], parsed)
+            applied.append(env_name)
+        _validate_config(self.config)
         return applied
+
+    def _save_config_updates(self, env_path: Path, updates: Dict[str, Any]) -> List[str]:
+        if not updates:
+            return []
+        field_map = {f["env"]: f for f in CONFIG_FIELDS}
+        normalized: Dict[str, str] = {}
+        for env_name, raw in updates.items():
+            field = field_map.get(env_name)
+            if field is None:
+                continue
+            parsed = self._parse_config_value(str(raw), field["type"])
+            setattr(self.config, field["attr"], parsed)
+            normalized[env_name] = str(parsed).lower() if field["type"] == "bool" else str(parsed)
+
+        _validate_config(self.config)
+        existing = env_path.read_text().splitlines() if env_path.exists() else []
+        output_lines: List[str] = []
+        consumed = set()
+        for line in existing:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in line:
+                output_lines.append(line)
+                continue
+            key, _val = line.split("=", 1)
+            key = key.strip()
+            if key in normalized:
+                output_lines.append(f"{key}={normalized[key]}")
+                consumed.add(key)
+            else:
+                output_lines.append(line)
+
+        if normalized and output_lines and output_lines[-1].strip() != "":
+            output_lines.append("")
+        for key in sorted(normalized.keys() - consumed):
+            output_lines.append(f"{key}={normalized[key]}")
+
+        env_path.write_text("\n".join(output_lines).rstrip() + "\n")
+        return sorted(normalized.keys())
 
     def _init_db(self) -> None:
         with self._db_lock:
@@ -1306,168 +1385,6 @@ def _as_dict(response: Any) -> Dict[str, Any]:
     if hasattr(response, "__dict__"):
         return dict(response.__dict__)
     raise TypeError(f"Unsupported response type: {type(response)!r}")
-
-
-def _render_dashboard_html(snapshot: Dict[str, Any]) -> str:
-    rows = []
-    for oid, order in snapshot.get("orders", {}).items():
-        rows.append(
-            f"<tr><td>{oid}</td><td>{order.get('side')}</td><td>{order.get('price')}</td>"
-            f"<td>{order.get('base_size')}</td><td>{order.get('grid_index')}</td></tr>"
-        )
-    events = "".join(f"<li>{event}</li>" for event in snapshot.get("recent_events", []))
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta http-equiv="refresh" content="10" />
-  <title>Thumber Trader Dashboard</title>
-  <style>
-    :root {{
-      --bg: #0b1220;
-      --panel: #121a2b;
-      --panel-soft: #1a2439;
-      --border: #2d3a58;
-      --text: #e8eefc;
-      --muted: #93a0bf;
-      --accent: #4f8cff;
-      --danger: #d95f5f;
-      --success: #3fb27f;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-      margin: 0;
-      background: radial-gradient(circle at top, #14213a 0%, var(--bg) 48%);
-      color: var(--text);
-      line-height: 1.4;
-    }}
-    .container {{ max-width: 1120px; margin: 24px auto; padding: 0 16px 24px; }}
-    .header {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }}
-    h1, h2 {{ margin: 0; }}
-    .muted {{ color: var(--muted); }}
-    .badge {{ background: var(--panel-soft); border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; font-size: 12px; color: var(--muted); }}
-    .grid {{ display:grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin: 14px 0 18px; }}
-    .card {{ background: linear-gradient(180deg, #16223a 0%, var(--panel) 100%); border: 1px solid var(--border); padding: 12px; border-radius: 10px; box-shadow: 0 8px 20px rgba(0,0,0,0.22); }}
-    .k {{ font-size: 12px; color: var(--muted); margin-bottom: 6px; }}
-    .v {{ font-size: 18px; font-weight: 600; }}
-    .section {{ margin-top: 18px; }}
-    .section-header {{ display:flex; align-items:center; justify-content:space-between; gap: 10px; margin-bottom: 8px; }}
-    .section-links a {{ color: var(--accent); text-decoration: none; font-size: 12px; margin-left: 10px; }}
-    .section-links a:hover {{ text-decoration: underline; }}
-    .table-wrap {{ max-height: 300px; overflow: auto; border-radius: 10px; }}
-    table {{ width:100%; border-collapse: collapse; font-size:14px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }}
-    td, th {{ border-bottom:1px solid var(--border); padding:10px 12px; text-align:left; }}
-    th {{ color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }}
-    tr:hover td {{ background: rgba(79, 140, 255, 0.06); }}
-    .controls {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }}
-    .control-item {{ background: var(--panel-soft); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }}
-    .control-item p {{ margin: 6px 0 0; font-size: 12px; color: var(--muted); }}
-    button {{ width: 100%; border: 1px solid transparent; border-radius: 8px; padding: 10px 12px; color: white; font-weight: 600; cursor: pointer; }}
-    button:hover {{ filter: brightness(1.08); }}
-    .btn-danger {{ background: var(--danger); }}
-    .btn-primary {{ background: var(--accent); }}
-    .btn-neutral {{ background: #5f6f95; }}
-    #action-status {{ display: none; margin-top: 12px; padding: 10px; border-radius: 8px; font-size: 13px; }}
-    #action-status.ok {{ display: block; background: rgba(63,178,127,.15); border: 1px solid rgba(63,178,127,.45); color: #b9f0d6; }}
-    #action-status.err {{ display: block; background: rgba(217,95,95,.15); border: 1px solid rgba(217,95,95,.45); color: #ffd1d1; }}
-    ul {{ margin-top: 10px; }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>Thumber Trader Dashboard</h1>
-      <span class="badge">Mode: <strong>{'PAPER' if snapshot.get('paper_trading_mode') else 'LIVE'}</strong></span>
-    </div>
-    <p class="muted">Operational control panel for monitoring open grid orders and runtime bot health.</p>
-
-    <div class="grid">
-      <div class="card"><div class="k">Product</div><div class="v">{snapshot.get('product_id')}</div></div>
-      <div class="card"><div class="k">Last Price</div><div class="v">{snapshot.get('last_price')}</div></div>
-      <div class="card"><div class="k">Trend</div><div class="v">{snapshot.get('trend_bias')}</div></div>
-      <div class="card"><div class="k">Portfolio (USD)</div><div class="v">{snapshot.get('portfolio_value_usd')}</div></div>
-      <div class="card"><div class="k">Active Orders</div><div class="v">{snapshot.get('active_orders')}</div></div>
-      <div class="card"><div class="k">Fills</div><div class="v">{snapshot.get('fills')}</div></div>
-    </div>
-
-    <div class="section" id="controls">
-      <div class="section-header">
-        <h2>Controls</h2>
-        <div class="section-links"><a href="#open-orders">Jump to Open Orders</a><a href="#recent-events">Jump to Recent Events</a></div>
-      </div>
-      <div class="controls">
-        <div class="control-item">
-          <button class="btn-danger" title="Cancel all active orders and stop the bot loop immediately" onclick="sendAction('kill_switch')">Emergency Kill Switch</button>
-          <p>Immediately cancel all open orders and halt execution.</p>
-        </div>
-        <div class="control-item">
-          <button class="btn-primary" title="Rebuild the full grid around current market price" onclick="sendAction('reanchor')">Manual Re-anchor</button>
-          <p>Re-center grid levels to current market and republish orders.</p>
-        </div>
-        <div class="control-item">
-          <button class="btn-neutral" title="Change selected runtime limits without restarting the service" onclick="reloadConfig()">Hot Reload Config</button>
-          <p>Update selected risk and profit knobs while bot is running.</p>
-        </div>
-      </div>
-      <div id="action-status" aria-live="polite"></div>
-    </div>
-
-    <div class="section" id="open-orders">
-      <div class="section-header"><h2>Open Orders</h2></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Order ID</th><th>Side</th><th>Price</th><th>Base Size</th><th>Grid Index</th></tr></thead>
-          <tbody>{''.join(rows)}</tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="section" id="recent-events">
-      <h2>Recent Events</h2>
-      <ul>{events}</ul>
-      <p><a href="/api/status">JSON API</a> · <a href="/api/tax_report.csv">Tax CSV</a></p>
-    </div>
-  </div>
-
-  <script>
-    function renderStatus(msg, ok=true) {{
-      const el = document.getElementById('action-status');
-      el.className = ok ? 'ok' : 'err';
-      el.textContent = msg;
-    }}
-
-    async function sendAction(action, updates) {{
-      try {{
-        const resp = await fetch('/api/action', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{action, updates}})
-        }});
-        const data = await resp.json();
-        const ok = Boolean(data.ok);
-        renderStatus(ok ? `Action "${{action}}" completed.` : (data.error || 'Action failed'), ok);
-      }} catch (err) {{
-        renderStatus(`Request failed: ${{err}}`, false);
-      }}
-    }}
-
-    function reloadConfig() {{
-      const target = prompt('TARGET_NET_PROFIT_PCT override (blank to skip):', '0.002');
-      const cap = prompt('MAX_BTC_INVENTORY_PCT override (blank to skip):', '0.65');
-      const updates = {{}};
-      if (target) updates.target_net_profit_pct = target;
-      if (cap) updates.max_btc_inventory_pct = cap;
-      if (Object.keys(updates).length === 0) {{
-        renderStatus('No config changes were provided.', false);
-        return;
-      }}
-      sendAction('reload_config', updates);
-    }}
-  </script>
-</body>
-</html>"""
 
 
 def build_client() -> Any:
