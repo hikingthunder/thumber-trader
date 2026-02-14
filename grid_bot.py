@@ -248,9 +248,12 @@ class GridBot:
         self.last_price = Decimal("0")
         self.last_trend_bias = "NEUTRAL"
         self.fill_count = 0
+        self._last_portfolio_value_usd = Decimal("0")
         self.recent_events: List[str] = []
         self._dashboard_server: Optional[ThreadingHTTPServer] = None
         self._state_lock = threading.RLock()
+        self._dashboard_update_cond = threading.Condition(self._state_lock)
+        self._dashboard_update_seq = 0
         self._ws_queue: asyncio.Queue[Dict[str, str]] = asyncio.Queue()
         self._ws_client: Optional[Any] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -335,6 +338,7 @@ class GridBot:
                     self.loop_count += 1
                     self.last_price = current_price
                     self.last_trend_bias = trend_bias
+                    self._notify_dashboard_update_locked()
                 if not self._paused:
                     await asyncio.to_thread(self._maybe_roll_grid, current_price)
                     await asyncio.to_thread(self._process_open_orders, current_price, trend_bias)
@@ -1158,6 +1162,24 @@ class GridBot:
         with self._state_lock:
             self.recent_events.append(f"{time.strftime('%H:%M:%S')} | {message}")
             self.recent_events = self.recent_events[-25:]
+            self._notify_dashboard_update_locked()
+
+    def _notify_dashboard_update_locked(self) -> None:
+        self._dashboard_update_seq += 1
+        self._dashboard_update_cond.notify_all()
+
+    def _dashboard_stream_snapshot(self) -> Dict[str, Any]:
+        with self._state_lock:
+            return {
+                "product_id": self.config.product_id,
+                "last_price": str(self.last_price),
+                "trend_bias": self.last_trend_bias,
+                "portfolio_value_usd": str(self._last_portfolio_value_usd),
+                "active_orders": len(self.orders),
+                "fills": self.fill_count,
+                "orders": self.orders,
+                "recent_events": list(self.recent_events),
+            }
 
     def _roll_daily_metrics_window(self) -> None:
         day_idx = int(time.time() // 86400)
@@ -1316,6 +1338,7 @@ class GridBot:
             usd_bal = self._get_available_balance("USD")
             base_bal = self._get_available_balance(self.base_currency)
             portfolio = usd_bal + (base_bal * price if price > 0 else Decimal("0"))
+            self._last_portfolio_value_usd = portfolio
             self._roll_daily_metrics_window()
             capital_used = max(Decimal("1"), portfolio)
             pnl_per_1k = (self._daily_realized_pnl / capital_used) * Decimal("1000")
@@ -1431,6 +1454,24 @@ class GridBot:
                     self.wfile.write(payload)
                     return
 
+                if parsed.path == "/api/stream":
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "keep-alive")
+                    self.end_headers()
+
+                    seq = -1
+                    while bot._running:
+                        with bot._dashboard_update_cond:
+                            if seq >= 0:
+                                bot._dashboard_update_cond.wait_for(lambda: bot._dashboard_update_seq != seq, timeout=15)
+                            seq = bot._dashboard_update_seq
+                        payload = json.dumps(bot._dashboard_stream_snapshot(), separators=(",", ":"))
+                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                    return
+
                 if bot.config.prometheus_enabled and parsed.path == bot.config.prometheus_path:
                     payload = bot._prometheus_metrics_payload().encode("utf-8")
                     self.send_response(HTTPStatus.OK)
@@ -1502,6 +1543,8 @@ class GridBot:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                with bot._dashboard_update_cond:
+                    bot._notify_dashboard_update_locked()
 
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
