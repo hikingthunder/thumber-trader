@@ -15,10 +15,13 @@ import logging
 import os
 import signal
 import stat
+import threading
 import time
 import urllib.parse
 import urllib.request
 import uuid
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN, getcontext
 from pathlib import Path
@@ -52,6 +55,16 @@ class BotConfig:
     trend_ema_slow: int = int(os.getenv("TREND_EMA_SLOW", "21"))
     trend_strength_threshold: Decimal = Decimal(os.getenv("TREND_STRENGTH_THRESHOLD", "0.003"))
 
+    # execution mode
+    paper_trading_mode: bool = os.getenv("PAPER_TRADING_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    paper_start_usd: Decimal = Decimal(os.getenv("PAPER_START_USD", "1000"))
+    paper_start_btc: Decimal = Decimal(os.getenv("PAPER_START_BTC", "0"))
+
+    # local dashboard
+    dashboard_enabled: bool = os.getenv("DASHBOARD_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    dashboard_host: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+    dashboard_port: int = int(os.getenv("DASHBOARD_PORT", "8080"))
+
 
 class GridBot:
     def __init__(self, client: RESTClient, config: BotConfig, orders_path: Path):
@@ -64,8 +77,22 @@ class GridBot:
         self.grid_anchor_price = Decimal("0")
         self.price_increment = Decimal("0.01")
         self.base_increment = Decimal("0.00000001")
+        self.start_ts = time.time()
+        self.loop_count = 0
+        self.last_price = Decimal("0")
+        self.last_trend_bias = "NEUTRAL"
+        self.fill_count = 0
+        self.recent_events: List[str] = []
+        self._dashboard_server: Optional[ThreadingHTTPServer] = None
+        self._state_lock = threading.RLock()
+        self.paper_balances = {
+            "USD": self.config.paper_start_usd,
+            "BTC": self.config.paper_start_btc,
+        }
 
     def run(self) -> None:
+        if self.config.dashboard_enabled:
+            self._start_dashboard_server()
         self._load_product_metadata()
         current_price = self._get_current_price()
         self.grid_anchor_price = current_price
@@ -82,13 +109,19 @@ class GridBot:
             try:
                 current_price = self._get_current_price()
                 trend_bias = self._get_trend_bias()
+                with self._state_lock:
+                    self.loop_count += 1
+                    self.last_price = current_price
+                    self.last_trend_bias = trend_bias
                 self._risk_monitor(current_price)
-                self._process_open_orders(trend_bias=trend_bias)
+                self._process_open_orders(current_price=current_price, trend_bias=trend_bias)
                 self._save_orders()
             except Exception as exc:
                 logging.exception("Loop error: %s", exc)
             if self._running:
                 time.sleep(self.config.poll_seconds)
+
+        self._stop_dashboard_server()
 
     def _load_product_metadata(self) -> None:
         product = _as_dict(self.client.get_product(product_id=self.config.product_id))
@@ -154,13 +187,12 @@ class GridBot:
 
         logging.info("Initial grid placed with trend bias=%s (buys=%s sells=%s).", trend_bias, len(buy_levels), len(sell_levels))
 
-    def _process_open_orders(self, trend_bias: str) -> None:
+    def _process_open_orders(self, current_price: Decimal, trend_bias: str) -> None:
         if not self.orders:
             return
 
         for order_id, record in list(self.orders.items()):
-            order = _as_dict(self.client.get_order(order_id=order_id))
-            status = str(order.get("status", "")).upper()
+            status = self._order_status(order_id=order_id, record=record, current_price=current_price)
             if status not in {"FILLED", "DONE", "COMPLETED"}:
                 continue
 
@@ -168,6 +200,9 @@ class GridBot:
             grid_index = int(record["grid_index"])
             fill_price = Decimal(str(record["price"]))
             self.orders.pop(order_id, None)
+            self.fill_count += 1
+            self._add_event(f"{side} filled @ {fill_price}")
+            self._apply_fill_to_paper_balances(side=side, base_size=Decimal(str(record["base_size"])), price=fill_price)
 
             if side == "BUY" and grid_index + 1 < len(self.grid_levels):
                 if trend_bias == "DOWN":
@@ -177,6 +212,7 @@ class GridBot:
                 new_id = self._place_grid_order(side="SELL", price=new_price, base_size=base_size, grid_index=grid_index + 1)
                 if new_id:
                     logging.info("Buy Filled at $%s! Placed Sell at $%s.", fill_price, new_price)
+                    self._add_event(f"Replacement SELL placed @ {new_price}")
 
             elif side == "SELL" and grid_index - 1 >= 0:
                 if trend_bias == "DOWN":
@@ -187,6 +223,20 @@ class GridBot:
                 new_id = self._place_grid_order(side="BUY", price=new_price, usd_notional=usd_notional, grid_index=grid_index - 1)
                 if new_id:
                     logging.info("Sell Filled at $%s! Placed Buy at $%s.", fill_price, new_price)
+                    self._add_event(f"Replacement BUY placed @ {new_price}")
+
+    def _order_status(self, order_id: str, record: Dict[str, Any], current_price: Decimal) -> str:
+        if not self.config.paper_trading_mode:
+            order = _as_dict(self.client.get_order(order_id=order_id))
+            return str(order.get("status", "")).upper()
+
+        side = str(record["side"]).upper()
+        price = Decimal(str(record["price"]))
+        if side == "BUY" and current_price <= price:
+            return "FILLED"
+        if side == "SELL" and current_price >= price:
+            return "FILLED"
+        return "OPEN"
 
     def _risk_monitor(self, current_price: Decimal) -> None:
         usd_bal = self._get_available_balance("USD")
@@ -237,10 +287,19 @@ class GridBot:
 
             usd_notional = max(usd_notional, self.config.min_notional_usd)
             base_size = self._q_base(usd_notional / price)
+            if self.config.paper_trading_mode:
+                available_usd = self._get_available_balance("USD")
+                required = base_size * price
+                if required > available_usd:
+                    logging.warning("Skipped BUY at %s in paper mode; insufficient USD.", price)
+                    return None
         elif side == "SELL":
             if base_size is None:
                 raise ValueError("base_size is required for SELL")
             base_size = self._q_base(base_size)
+            if self.config.paper_trading_mode and base_size > self._get_available_balance("BTC"):
+                logging.warning("Skipped SELL at %s in paper mode; insufficient BTC.", price)
+                return None
         else:
             raise ValueError(f"Unsupported side {side}")
 
@@ -261,14 +320,17 @@ class GridBot:
                 }
             },
         }
-        response = _as_dict(self.client.create_order(**payload))
-        if not bool(response.get("success", True)):
-            logging.error("Order rejected: %s", response)
-            return None
+        if self.config.paper_trading_mode:
+            order_id = f"paper-{uuid.uuid4()}"
+        else:
+            response = _as_dict(self.client.create_order(**payload))
+            if not bool(response.get("success", True)):
+                logging.error("Order rejected: %s", response)
+                return None
 
-        order_id = response.get("order_id") or response.get("success_response", {}).get("order_id")
-        if not order_id:
-            raise RuntimeError(f"Order id missing from response: {response}")
+            order_id = response.get("order_id") or response.get("success_response", {}).get("order_id")
+            if not order_id:
+                raise RuntimeError(f"Order id missing from response: {response}")
 
         self.orders[order_id] = {
             "side": side,
@@ -278,6 +340,7 @@ class GridBot:
             "product_id": self.config.product_id,
         }
         logging.info("Placed %s LIMIT post-only: %s @ %s", side, base_size, price)
+        self._add_event(f"{side} order placed @ {price} (id={order_id[:12]})")
         return order_id
 
     def _btc_inventory_ratio(self, ref_price: Decimal) -> Decimal:
@@ -339,6 +402,9 @@ class GridBot:
         return value.quantize(self.base_increment, rounding=ROUND_DOWN)
 
     def _get_available_balance(self, currency: str) -> Decimal:
+        if self.config.paper_trading_mode:
+            return self.paper_balances.get(currency, Decimal("0"))
+
         payload = _as_dict(self.client.get_accounts())
         for account in payload.get("accounts", []):
             if account.get("currency") == currency:
@@ -368,6 +434,84 @@ class GridBot:
     def stop(self) -> None:
         self._running = False
 
+    def _apply_fill_to_paper_balances(self, side: str, base_size: Decimal, price: Decimal) -> None:
+        if not self.config.paper_trading_mode:
+            return
+        notional = base_size * price
+        if side == "BUY":
+            self.paper_balances["USD"] = self.paper_balances["USD"] - notional
+            self.paper_balances["BTC"] = self.paper_balances["BTC"] + base_size
+        elif side == "SELL":
+            self.paper_balances["USD"] = self.paper_balances["USD"] + notional
+            self.paper_balances["BTC"] = self.paper_balances["BTC"] - base_size
+
+    def _add_event(self, message: str) -> None:
+        with self._state_lock:
+            self.recent_events.append(f"{time.strftime('%H:%M:%S')} | {message}")
+            self.recent_events = self.recent_events[-25:]
+
+    def _status_snapshot(self) -> Dict[str, Any]:
+        with self._state_lock:
+            price = self.last_price
+            usd_bal = self._get_available_balance("USD")
+            btc_bal = self._get_available_balance("BTC")
+            portfolio = usd_bal + (btc_bal * price if price > 0 else Decimal("0"))
+            return {
+                "product_id": self.config.product_id,
+                "paper_trading_mode": self.config.paper_trading_mode,
+                "runtime_seconds": int(time.time() - self.start_ts),
+                "loop_count": self.loop_count,
+                "last_price": str(price),
+                "trend_bias": self.last_trend_bias,
+                "active_orders": len(self.orders),
+                "fills": self.fill_count,
+                "balances": {"USD": str(usd_bal), "BTC": str(btc_bal)},
+                "portfolio_value_usd": str(portfolio),
+                "recent_events": list(self.recent_events),
+                "orders": self.orders,
+            }
+
+    def _start_dashboard_server(self) -> None:
+        bot = self
+
+        class DashboardHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path == "/api/status":
+                    payload = json.dumps(bot._status_snapshot(), indent=2).encode("utf-8")
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+
+                if self.path != "/":
+                    self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+                    return
+
+                snapshot = bot._status_snapshot()
+                html = _render_dashboard_html(snapshot).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(html)))
+                self.end_headers()
+                self.wfile.write(html)
+
+            def log_message(self, _format: str, *_args: Any) -> None:
+                return
+
+        self._dashboard_server = ThreadingHTTPServer((self.config.dashboard_host, self.config.dashboard_port), DashboardHandler)
+        thread = threading.Thread(target=self._dashboard_server.serve_forever, name="dashboard-server", daemon=True)
+        thread.start()
+        logging.info("Dashboard available at http://%s:%s", self.config.dashboard_host, self.config.dashboard_port)
+
+    def _stop_dashboard_server(self) -> None:
+        if self._dashboard_server is None:
+            return
+        self._dashboard_server.shutdown()
+        self._dashboard_server.server_close()
+        self._dashboard_server = None
+
 
 def _validate_config(config: BotConfig) -> None:
     if config.grid_lines < 2:
@@ -382,6 +526,10 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("QUOTE_RESERVE_PCT must be in [0,1)")
     if not (Decimal("0") < config.max_btc_inventory_pct <= Decimal("1")):
         raise ValueError("MAX_BTC_INVENTORY_PCT must be in (0,1]")
+    if config.dashboard_port <= 0:
+        raise ValueError("DASHBOARD_PORT must be > 0")
+    if config.paper_start_usd < 0 or config.paper_start_btc < 0:
+        raise ValueError("PAPER_START_USD and PAPER_START_BTC must be >= 0")
 
 
 def _orders_path() -> Path:
@@ -422,6 +570,51 @@ def _as_dict(response: Any) -> Dict[str, Any]:
     if hasattr(response, "__dict__"):
         return dict(response.__dict__)
     raise TypeError(f"Unsupported response type: {type(response)!r}")
+
+
+def _render_dashboard_html(snapshot: Dict[str, Any]) -> str:
+    rows = []
+    for oid, order in snapshot.get("orders", {}).items():
+        rows.append(
+            f"<tr><td>{oid}</td><td>{order.get('side')}</td><td>{order.get('price')}</td>"
+            f"<td>{order.get('base_size')}</td><td>{order.get('grid_index')}</td></tr>"
+        )
+    events = "".join(f"<li>{event}</li>" for event in snapshot.get("recent_events", []))
+    return f"""<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta http-equiv=\"refresh\" content=\"10\" />
+  <title>Thumber Trader Dashboard</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; background:#111; color:#e6e6e6; }}
+    .grid {{ display:grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:16px; }}
+    .card {{ background:#1d1d1d; padding:12px; border-radius:8px; }}
+    table {{ width:100%; border-collapse: collapse; font-size:14px; }}
+    td, th {{ border-bottom:1px solid #333; padding:8px; text-align:left; }}
+  </style>
+</head>
+<body>
+  <h1>Thumber Trader Dashboard</h1>
+  <p>Mode: <strong>{'PAPER' if snapshot.get('paper_trading_mode') else 'LIVE'}</strong></p>
+  <div class=\"grid\">
+    <div class=\"card\"><div>Product</div><strong>{snapshot.get('product_id')}</strong></div>
+    <div class=\"card\"><div>Last Price</div><strong>{snapshot.get('last_price')}</strong></div>
+    <div class=\"card\"><div>Trend</div><strong>{snapshot.get('trend_bias')}</strong></div>
+    <div class=\"card\"><div>Portfolio (USD)</div><strong>{snapshot.get('portfolio_value_usd')}</strong></div>
+    <div class=\"card\"><div>Active Orders</div><strong>{snapshot.get('active_orders')}</strong></div>
+    <div class=\"card\"><div>Fills</div><strong>{snapshot.get('fills')}</strong></div>
+  </div>
+  <h2>Open Orders</h2>
+  <table>
+    <thead><tr><th>Order ID</th><th>Side</th><th>Price</th><th>Base Size</th><th>Grid Index</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+  <h2>Recent Events</h2>
+  <ul>{events}</ul>
+  <p><a href=\"/api/status\">JSON API</a></p>
+</body>
+</html>"""
 
 
 def build_client() -> RESTClient:
