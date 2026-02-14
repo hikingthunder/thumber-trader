@@ -81,6 +81,16 @@ MIN_NOTIONAL_USD=6
 MIN_GRID_PROFIT_PCT=0.015
 POLL_SECONDS=60
 
+# Optional local dashboard
+DASHBOARD_ENABLED=true
+DASHBOARD_HOST=127.0.0.1
+DASHBOARD_PORT=8080
+
+# Safer dry-run mode (simulated fills + balances)
+PAPER_TRADING_MODE=false
+PAPER_START_USD=1000
+PAPER_START_BTC=0
+
 BASE_ORDER_NOTIONAL_USD=10
 QUOTE_RESERVE_PCT=0.25
 MAX_BTC_INVENTORY_PCT=0.65
@@ -111,6 +121,10 @@ sudo -u gridbot bash -lc 'cd /opt/thumber-trader && set -a && source .env && set
 ```
 
 Watch logs for initial grid placement and no permission errors.
+
+If dashboard is enabled, open `http://127.0.0.1:8080` (or your configured host/port) to monitor runtime status, open orders, recent events, and JSON status (`/api/status`).
+
+Use `PAPER_TRADING_MODE=true` for a live-data dry run without sending exchange orders.
 
 ## 5) Install as systemd service
 
