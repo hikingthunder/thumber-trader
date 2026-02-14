@@ -156,6 +156,11 @@ QUOTE_RESERVE_PCT=0.25
 MAX_BTC_INVENTORY_PCT=0.65
 HARD_STOP_LOSS_PCT=0.08
 
+# Optional liquidity-aware sell sizing using level2 order book depth
+LIQUIDITY_DEPTH_CHECK_ENABLED=true
+LIQUIDITY_DEPTH_LEVELS=50
+LIQUIDITY_MAX_BOOK_SHARE_PCT=0.20
+
 # Optional dynamic inventory cap scaling by trend strength
 DYNAMIC_INVENTORY_CAP_ENABLED=false
 INVENTORY_CAP_MIN_PCT=0.30
