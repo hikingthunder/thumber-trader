@@ -274,6 +274,34 @@ python backtest.py \
 
 The script prints JSON metrics per scenario, including ending equity, net PnL, fills, and residual open orders.
 
+### Walk-Forward Optimization (WFO)
+
+Use walk-forward mode to reduce overfitting by repeatedly training parameters on an in-sample window, then validating them on the immediately following out-of-sample window.
+
+Default behavior in WFO mode:
+
+- In-sample window: 7 days
+- Out-of-sample window: 2 days
+- Optimization targets: `ATR_BAND_MULTIPLIER`, `ADX_RANGE_BAND_MULTIPLIER`, `ADX_TREND_BAND_MULTIPLIER`
+
+Example (30-day lookback, 7d train + 2d test folds):
+
+```bash
+python backtest.py \
+  --csv data/btc_usd_1m.csv \
+  --product-id BTC-USD \
+  --grid-lines 8 \
+  --lookback-minutes 43200 \
+  --wfo-enabled \
+  --wfo-in-sample-days 7 \
+  --wfo-out-sample-days 2 \
+  --wfo-atr-multipliers 3.0,4.0,5.0 \
+  --wfo-adx-range-multipliers 0.7,0.8,0.9 \
+  --wfo-adx-trend-multipliers 1.1,1.25,1.4
+```
+
+Output includes per-fold selected parameters, in-sample/out-of-sample metrics, plus summary robustness stats (fold win rate and aggregate out-of-sample PnL).
+
 ## Prometheus + Grafana observability
 
 When dashboard is enabled, the bot also serves a Prometheus endpoint (default: `http://127.0.0.1:8080/metrics`).
