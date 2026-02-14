@@ -63,4 +63,11 @@ CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"env": "SAFE_START_ENABLED", "attr": "safe_start_enabled", "type": "bool"},
     {"env": "BASE_BUY_MODE", "attr": "base_buy_mode", "type": "str"},
     {"env": "SHARED_USD_RESERVE_ENABLED", "attr": "shared_usd_reserve_enabled", "type": "bool"},
+    {"env": "CROSS_ASSET_CORRELATION_ENABLED", "attr": "cross_asset_correlation_enabled", "type": "bool"},
+    {"env": "CROSS_ASSET_CORRELATION_THRESHOLD", "attr": "cross_asset_correlation_threshold", "type": "decimal"},
+    {"env": "CROSS_ASSET_LEADER_INVENTORY_TRIGGER_PCT", "attr": "cross_asset_leader_inventory_trigger_pct", "type": "decimal"},
+    {"env": "CROSS_ASSET_INVENTORY_TIGHTENING_FACTOR", "attr": "cross_asset_inventory_tightening_factor", "type": "decimal"},
+    {"env": "CROSS_ASSET_INVENTORY_MIN_PCT", "attr": "cross_asset_inventory_min_pct", "type": "decimal"},
+    {"env": "CROSS_ASSET_CANDLE_LOOKBACK", "attr": "cross_asset_candle_lookback", "type": "int"},
+    {"env": "CROSS_ASSET_REFRESH_SECONDS", "attr": "cross_asset_refresh_seconds", "type": "int"},
 ]
