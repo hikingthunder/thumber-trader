@@ -209,6 +209,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-start-base", type=Decimal, default=Decimal("0"), help="Starting paper base-asset balance")
     parser.add_argument("--base-order-notional", type=Decimal, default=Decimal("10"), help="Base notional per buy order")
     parser.add_argument("--poll-seconds", type=int, default=60, help="Bot poll interval (used for config validation only)")
+    parser.add_argument(
+        "--wfo-enabled",
+        action="store_true",
+        help="Enable walk-forward optimization (train on in-sample window, validate on out-of-sample window)",
+    )
+    parser.add_argument(
+        "--wfo-in-sample-days",
+        type=int,
+        default=7,
+        help="In-sample training window size in days when --wfo-enabled is used",
+    )
+    parser.add_argument(
+        "--wfo-out-sample-days",
+        type=int,
+        default=2,
+        help="Out-of-sample validation window size in days when --wfo-enabled is used",
+    )
+    parser.add_argument(
+        "--wfo-atr-multipliers",
+        default="3.0,4.0,5.0",
+        help="Comma-separated ATR band multiplier candidates for WFO",
+    )
+    parser.add_argument(
+        "--wfo-adx-range-multipliers",
+        default="0.7,0.8,0.9",
+        help="Comma-separated ADX ranging band multiplier candidates for WFO",
+    )
+    parser.add_argument(
+        "--wfo-adx-trend-multipliers",
+        default="1.1,1.25,1.4",
+        help="Comma-separated ADX trending band multiplier candidates for WFO",
+    )
     return parser.parse_args()
 
 
@@ -245,6 +277,144 @@ def _build_backtest_config(args: argparse.Namespace, grid_lines: int, state_db_p
     return cfg
 
 
+def _parse_decimal_candidates(raw: str, field_name: str) -> List[Decimal]:
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    if not values:
+        raise ValueError(f"{field_name} requires at least one candidate value")
+    return [Decimal(value) for value in values]
+
+
+def _run_walk_forward(
+    *,
+    args: argparse.Namespace,
+    candles: Sequence[Candle],
+    start_index: int,
+    end_index: int,
+    grid_lines: int,
+) -> Dict[str, Any]:
+    in_sample_minutes = args.wfo_in_sample_days * 24 * 60
+    out_sample_minutes = args.wfo_out_sample_days * 24 * 60
+    if in_sample_minutes <= 0 or out_sample_minutes <= 0:
+        raise ValueError("WFO windows must be > 0 days")
+
+    atr_candidates = _parse_decimal_candidates(args.wfo_atr_multipliers, "--wfo-atr-multipliers")
+    adx_range_candidates = _parse_decimal_candidates(args.wfo_adx_range_multipliers, "--wfo-adx-range-multipliers")
+    adx_trend_candidates = _parse_decimal_candidates(args.wfo_adx_trend_multipliers, "--wfo-adx-trend-multipliers")
+
+    total_needed = in_sample_minutes + out_sample_minutes
+    total_available = (end_index - start_index) + 1
+    if total_available < total_needed:
+        raise ValueError(
+            f"Not enough candles for WFO: need at least {total_needed}, found {total_available} in requested lookback"
+        )
+
+    folds: List[Dict[str, Any]] = []
+    cursor = start_index
+    fold_id = 1
+    while True:
+        in_start = cursor
+        in_end = in_start + in_sample_minutes - 1
+        out_start = in_end + 1
+        out_end = out_start + out_sample_minutes - 1
+        if out_end > end_index:
+            break
+
+        best_train_result: Dict[str, Any] | None = None
+        best_params: Dict[str, str] | None = None
+
+        for atr_mult in atr_candidates:
+            for adx_range_mult in adx_range_candidates:
+                for adx_trend_mult in adx_trend_candidates:
+                    with tempfile.TemporaryDirectory(prefix="thumber-backtest-state-") as tmp_state:
+                        base_cfg = _build_backtest_config(
+                            args=args,
+                            grid_lines=grid_lines,
+                            state_db_path=str(Path(tmp_state) / f"wfo_train_{fold_id}.db"),
+                        )
+                        tuned_cfg = replace(
+                            base_cfg,
+                            atr_enabled=True,
+                            atr_band_multiplier=atr_mult,
+                            adx_range_band_multiplier=adx_range_mult,
+                            adx_trend_band_multiplier=adx_trend_mult,
+                        )
+                        train_result = run_backtest(
+                            config=tuned_cfg,
+                            candles=candles,
+                            start_index=in_start,
+                            end_index=in_end,
+                        )
+                    train_pnl = Decimal(train_result["net_pnl_usd"])
+                    if best_train_result is None or train_pnl > Decimal(best_train_result["net_pnl_usd"]):
+                        best_train_result = train_result
+                        best_params = {
+                            "atr_band_multiplier": str(atr_mult),
+                            "adx_range_band_multiplier": str(adx_range_mult),
+                            "adx_trend_band_multiplier": str(adx_trend_mult),
+                        }
+
+        if best_train_result is None or best_params is None:
+            raise RuntimeError("WFO failed to evaluate parameter candidates")
+
+        with tempfile.TemporaryDirectory(prefix="thumber-backtest-state-") as tmp_state:
+            fold_cfg = _build_backtest_config(
+                args=args,
+                grid_lines=grid_lines,
+                state_db_path=str(Path(tmp_state) / f"wfo_test_{fold_id}.db"),
+            )
+            fold_cfg = replace(
+                fold_cfg,
+                atr_enabled=True,
+                atr_band_multiplier=Decimal(best_params["atr_band_multiplier"]),
+                adx_range_band_multiplier=Decimal(best_params["adx_range_band_multiplier"]),
+                adx_trend_band_multiplier=Decimal(best_params["adx_trend_band_multiplier"]),
+            )
+            out_result = run_backtest(config=fold_cfg, candles=candles, start_index=out_start, end_index=out_end)
+
+        folds.append(
+            {
+                "fold": fold_id,
+                "in_sample_window": {"start_ts": candles[in_start][0], "end_ts": candles[in_end][0]},
+                "out_sample_window": {"start_ts": candles[out_start][0], "end_ts": candles[out_end][0]},
+                "best_params": best_params,
+                "in_sample_result": best_train_result,
+                "out_sample_result": out_result,
+            }
+        )
+
+        fold_id += 1
+        cursor = out_start
+
+    if not folds:
+        raise ValueError("WFO produced zero folds; increase lookback or reduce WFO window sizes")
+
+    total_out_sample_pnl = sum(Decimal(fold["out_sample_result"]["net_pnl_usd"]) for fold in folds)
+    avg_out_sample_pnl = total_out_sample_pnl / Decimal(len(folds))
+    profitable_folds = sum(1 for fold in folds if Decimal(fold["out_sample_result"]["net_pnl_usd"]) > 0)
+
+    return {
+        "mode": "walk_forward_optimization",
+        "product_id": args.product_id.upper(),
+        "grid_lines": grid_lines,
+        "window": {"start_ts": candles[start_index][0], "end_ts": candles[end_index][0]},
+        "settings": {
+            "in_sample_days": args.wfo_in_sample_days,
+            "out_sample_days": args.wfo_out_sample_days,
+            "atr_band_multiplier_candidates": [str(value) for value in atr_candidates],
+            "adx_range_band_multiplier_candidates": [str(value) for value in adx_range_candidates],
+            "adx_trend_band_multiplier_candidates": [str(value) for value in adx_trend_candidates],
+        },
+        "summary": {
+            "fold_count": len(folds),
+            "out_sample_profitable_folds": profitable_folds,
+            "out_sample_win_rate": f"{(profitable_folds / len(folds)):.4f}",
+            "total_out_sample_pnl_usd": _format_decimal(total_out_sample_pnl),
+            "avg_out_sample_pnl_usd": _format_decimal(avg_out_sample_pnl),
+        },
+        "folds": folds,
+    }
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -262,6 +432,17 @@ def main() -> None:
     results: List[Dict[str, Any]] = []
 
     for grid_lines in scenarios:
+        if args.wfo_enabled:
+            result = _run_walk_forward(
+                args=args,
+                candles=candles,
+                start_index=start_index,
+                end_index=end_index,
+                grid_lines=grid_lines,
+            )
+            results.append(result)
+            continue
+
         with tempfile.TemporaryDirectory(prefix="thumber-backtest-state-") as tmp_state:
             config = _build_backtest_config(
                 args=args,
