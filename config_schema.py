@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"env": "PRODUCT_ID", "attr": "product_id", "type": "str"},
+    {"env": "PRODUCT_IDS", "attr": "product_ids", "type": "str"},
     {"env": "GRID_LINES", "attr": "grid_lines", "type": "int"},
     {"env": "GRID_BAND_PCT", "attr": "grid_band_pct", "type": "decimal"},
     {"env": "MIN_NOTIONAL_USD", "attr": "min_notional_usd", "type": "decimal"},
@@ -40,6 +41,7 @@ CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"env": "PAPER_TRADING_MODE", "attr": "paper_trading_mode", "type": "bool"},
     {"env": "PAPER_START_USD", "attr": "paper_start_usd", "type": "decimal"},
     {"env": "PAPER_START_BTC", "attr": "paper_start_btc", "type": "decimal"},
+    {"env": "PAPER_START_BASE", "attr": "paper_start_base", "type": "decimal"},
     {"env": "PAPER_FILL_EXCEED_PCT", "attr": "paper_fill_exceed_pct", "type": "decimal"},
     {"env": "PAPER_FILL_DELAY_SECONDS", "attr": "paper_fill_delay_seconds", "type": "int"},
     {"env": "PAPER_SLIPPAGE_PCT", "attr": "paper_slippage_pct", "type": "decimal"},
@@ -52,4 +54,5 @@ CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"env": "LEGACY_ORDERS_JSON_ENABLED", "attr": "legacy_orders_json_enabled", "type": "bool"},
     {"env": "SAFE_START_ENABLED", "attr": "safe_start_enabled", "type": "bool"},
     {"env": "BASE_BUY_MODE", "attr": "base_buy_mode", "type": "str"},
+    {"env": "SHARED_USD_RESERVE_ENABLED", "attr": "shared_usd_reserve_enabled", "type": "bool"},
 ]
