@@ -40,7 +40,19 @@ class BotConfig:
     grid_band_pct: Decimal = Decimal(os.getenv("GRID_BAND_PCT", "0.15"))
     min_notional_usd: Decimal = Decimal(os.getenv("MIN_NOTIONAL_USD", "6"))
     min_grid_profit_pct: Decimal = Decimal(os.getenv("MIN_GRID_PROFIT_PCT", "0.015"))
+    maker_fee_pct: Decimal = Decimal(os.getenv("MAKER_FEE_PCT", "0.004"))
+    target_net_profit_pct: Decimal = Decimal(os.getenv("TARGET_NET_PROFIT_PCT", "0.002"))
     poll_seconds: int = int(os.getenv("POLL_SECONDS", "60"))
+
+    # grid shape
+    grid_spacing_mode: str = os.getenv("GRID_SPACING_MODE", "arithmetic").strip().lower()
+
+    # volatility-adaptive grid
+    atr_enabled: bool = os.getenv("ATR_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    atr_period: int = int(os.getenv("ATR_PERIOD", "14"))
+    atr_band_multiplier: Decimal = Decimal(os.getenv("ATR_BAND_MULTIPLIER", "4"))
+    atr_min_band_pct: Decimal = Decimal(os.getenv("ATR_MIN_BAND_PCT", "0.03"))
+    atr_max_band_pct: Decimal = Decimal(os.getenv("ATR_MAX_BAND_PCT", "0.35"))
 
     # capital and risk controls
     base_order_notional_usd: Decimal = Decimal(os.getenv("BASE_ORDER_NOTIONAL_USD", "10"))
@@ -54,6 +66,14 @@ class BotConfig:
     trend_ema_fast: int = int(os.getenv("TREND_EMA_FAST", "9"))
     trend_ema_slow: int = int(os.getenv("TREND_EMA_SLOW", "21"))
     trend_strength_threshold: Decimal = Decimal(os.getenv("TREND_STRENGTH_THRESHOLD", "0.003"))
+    dynamic_inventory_cap_enabled: bool = os.getenv("DYNAMIC_INVENTORY_CAP_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    inventory_cap_min_pct: Decimal = Decimal(os.getenv("INVENTORY_CAP_MIN_PCT", "0.30"))
+    inventory_cap_max_pct: Decimal = Decimal(os.getenv("INVENTORY_CAP_MAX_PCT", "0.80"))
 
     # execution mode
     paper_trading_mode: bool = os.getenv("PAPER_TRADING_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -85,6 +105,8 @@ class GridBot:
         self.recent_events: List[str] = []
         self._dashboard_server: Optional[ThreadingHTTPServer] = None
         self._state_lock = threading.RLock()
+        self._cached_trend_strength = Decimal("0")
+        self._active_inventory_cap_pct = self.config.max_btc_inventory_pct
         self.paper_balances = {
             "USD": self.config.paper_start_usd,
             "BTC": self.config.paper_start_btc,
@@ -142,18 +164,54 @@ class GridBot:
         if self.config.grid_lines < 2:
             raise ValueError("GRID_LINES must be >= 2")
 
-        lower = current_price * (Decimal("1") - self.config.grid_band_pct)
-        upper = current_price * (Decimal("1") + self.config.grid_band_pct)
-        step = (upper - lower) / Decimal(self.config.grid_lines - 1)
-        step_pct = step / current_price
-        if step_pct < self.config.min_grid_profit_pct:
+        effective_band_pct = self._effective_grid_band_pct(current_price)
+        lower = current_price * (Decimal("1") - effective_band_pct)
+        upper = current_price * (Decimal("1") + effective_band_pct)
+
+        min_required_step_pct = max(
+            self.config.min_grid_profit_pct,
+            (self.config.maker_fee_pct * Decimal("2")) + self.config.target_net_profit_pct,
+        )
+
+        if self.config.grid_spacing_mode == "geometric":
+            ratio = (upper / lower) ** (Decimal("1") / Decimal(self.config.grid_lines - 1))
+            levels = [self._q_price(lower * (ratio ** Decimal(i))) for i in range(self.config.grid_lines)]
+        else:
+            step = (upper - lower) / Decimal(self.config.grid_lines - 1)
+            levels = [self._q_price(lower + step * Decimal(i)) for i in range(self.config.grid_lines)]
+
+        levels = sorted(set(levels))
+        if len(levels) < 2:
+            raise ValueError("Grid precision/increments collapsed levels below usable range; widen band or reduce lines.")
+
+        spacing_pct = (levels[1] - levels[0]) / current_price
+        if spacing_pct < min_required_step_pct:
             raise ValueError(
-                f"Grid spacing {step_pct:.4%} is below required minimum {self.config.min_grid_profit_pct:.4%}."
+                f"Grid spacing {spacing_pct:.4%} is below required minimum {min_required_step_pct:.4%}."
             )
 
-        levels = [self._q_price(lower + step * Decimal(i)) for i in range(self.config.grid_lines)]
-        logging.info("Grid: lower=%s upper=%s lines=%s step≈%.2f%%", levels[0], levels[-1], len(levels), float(step_pct * 100))
+        logging.info(
+            "Grid(%s): lower=%s upper=%s lines=%s step≈%.2f%% band≈%.2f%%",
+            self.config.grid_spacing_mode,
+            levels[0],
+            levels[-1],
+            len(levels),
+            float(spacing_pct * 100),
+            float(effective_band_pct * 100),
+        )
         return levels
+
+    def _effective_grid_band_pct(self, current_price: Decimal) -> Decimal:
+        if not self.config.atr_enabled:
+            return self.config.grid_band_pct
+
+        candles = self._fetch_public_candles()
+        atr = _atr(candles, self.config.atr_period)
+        if atr <= 0:
+            return self.config.grid_band_pct
+
+        dynamic_pct = (atr * self.config.atr_band_multiplier) / current_price
+        return max(self.config.atr_min_band_pct, min(dynamic_pct, self.config.atr_max_band_pct))
 
     def _place_initial_grid_orders(self, current_price: Decimal) -> None:
         trend_bias = self._get_trend_bias()
@@ -248,11 +306,11 @@ class GridBot:
             return
 
         btc_ratio = btc_notional / portfolio_value
-        if btc_ratio > self.config.max_btc_inventory_pct:
+        if btc_ratio > self._active_inventory_cap_pct:
             logging.warning(
                 "Risk: BTC inventory %.2f%% exceeds limit %.2f%%. New buy placements are throttled.",
                 float(btc_ratio * 100),
-                float(self.config.max_btc_inventory_pct * 100),
+                float(self._active_inventory_cap_pct * 100),
             )
 
         stop_price = self.grid_anchor_price * (Decimal("1") - self.config.hard_stop_loss_pct)
@@ -281,7 +339,7 @@ class GridBot:
                 raise ValueError("usd_notional is required for BUY")
 
             # Exposure gate: do not add BTC if portfolio already BTC-heavy.
-            if self._btc_inventory_ratio(price) > self.config.max_btc_inventory_pct:
+            if self._btc_inventory_ratio(price) > self._active_inventory_cap_pct:
                 logging.warning("Skipped BUY at %s due to BTC inventory cap.", price)
                 return None
 
@@ -354,14 +412,21 @@ class GridBot:
         closes = self._fetch_public_candle_closes()
         if len(closes) < max(self.config.trend_ema_fast, self.config.trend_ema_slow):
             logging.info("Trend data unavailable/insufficient; using NEUTRAL bias.")
+            self._cached_trend_strength = Decimal("0")
+            self._active_inventory_cap_pct = self._compute_dynamic_inventory_cap(Decimal("0"))
             return "NEUTRAL"
 
         ema_fast = _ema(closes, self.config.trend_ema_fast)
         ema_slow = _ema(closes, self.config.trend_ema_slow)
         if ema_slow <= 0:
+            self._cached_trend_strength = Decimal("0")
+            self._active_inventory_cap_pct = self._compute_dynamic_inventory_cap(Decimal("0"))
             return "NEUTRAL"
 
         strength = (ema_fast - ema_slow) / ema_slow
+        self._cached_trend_strength = strength
+        self._active_inventory_cap_pct = self._compute_dynamic_inventory_cap(strength)
+
         if strength >= self.config.trend_strength_threshold:
             return "UP"
         if strength <= -self.config.trend_strength_threshold:
@@ -369,6 +434,10 @@ class GridBot:
         return "NEUTRAL"
 
     def _fetch_public_candle_closes(self) -> List[Decimal]:
+        candles = self._fetch_public_candles()
+        return [c[3] for c in candles]
+
+    def _fetch_public_candles(self) -> List[Tuple[int, Decimal, Decimal, Decimal]]:
         params = urllib.parse.urlencode(
             {
                 "granularity": self.config.trend_candle_granularity,
@@ -384,16 +453,29 @@ class GridBot:
             return []
 
         candles = payload.get("candles", [])
-        rows: List[Tuple[int, Decimal]] = []
+        rows: List[Tuple[int, Decimal, Decimal, Decimal]] = []
         for candle in candles:
             close = candle.get("close")
             start = candle.get("start")
-            if close is None or start is None:
+            high = candle.get("high")
+            low = candle.get("low")
+            if close is None or start is None or high is None or low is None:
                 continue
-            rows.append((int(start), Decimal(str(close))))
+            rows.append((int(start), Decimal(str(high)), Decimal(str(low)), Decimal(str(close))))
 
         rows.sort(key=lambda x: x[0])
-        return [r[1] for r in rows]
+        return rows
+
+    def _compute_dynamic_inventory_cap(self, trend_strength: Decimal) -> Decimal:
+        if not self.config.dynamic_inventory_cap_enabled:
+            return self.config.max_btc_inventory_pct
+
+        cap_min = min(self.config.inventory_cap_min_pct, self.config.inventory_cap_max_pct)
+        cap_max = max(self.config.inventory_cap_min_pct, self.config.inventory_cap_max_pct)
+        threshold = self.config.trend_strength_threshold if self.config.trend_strength_threshold > 0 else Decimal("0.001")
+        normalized = max(Decimal("-1"), min(Decimal("1"), trend_strength / (threshold * Decimal("3"))))
+        weight = (normalized + Decimal("1")) / Decimal("2")
+        return cap_min + ((cap_max - cap_min) * weight)
 
     def _q_price(self, value: Decimal) -> Decimal:
         return value.quantize(self.price_increment, rounding=ROUND_DOWN)
@@ -467,6 +549,8 @@ class GridBot:
                 "fills": self.fill_count,
                 "balances": {"USD": str(usd_bal), "BTC": str(btc_bal)},
                 "portfolio_value_usd": str(portfolio),
+                "inventory_cap_pct": str(self._active_inventory_cap_pct),
+                "trend_strength": str(self._cached_trend_strength),
                 "recent_events": list(self.recent_events),
                 "orders": self.orders,
             }
@@ -518,6 +602,16 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("GRID_LINES must be >= 2")
     if config.poll_seconds < 5:
         raise ValueError("POLL_SECONDS must be >= 5")
+    if config.grid_spacing_mode not in {"arithmetic", "geometric"}:
+        raise ValueError("GRID_SPACING_MODE must be arithmetic or geometric")
+    if config.maker_fee_pct < 0 or config.target_net_profit_pct < 0:
+        raise ValueError("MAKER_FEE_PCT and TARGET_NET_PROFIT_PCT must be >= 0")
+    if config.atr_period <= 1:
+        raise ValueError("ATR_PERIOD must be > 1")
+    if config.atr_band_multiplier <= 0:
+        raise ValueError("ATR_BAND_MULTIPLIER must be > 0")
+    if not (Decimal("0") < config.atr_min_band_pct <= config.atr_max_band_pct < Decimal("1")):
+        raise ValueError("ATR_MIN_BAND_PCT and ATR_MAX_BAND_PCT must satisfy 0 < min <= max < 1")
     if config.base_order_notional_usd <= 0:
         raise ValueError("BASE_ORDER_NOTIONAL_USD must be > 0")
     if config.min_notional_usd <= 0:
@@ -526,6 +620,10 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("QUOTE_RESERVE_PCT must be in [0,1)")
     if not (Decimal("0") < config.max_btc_inventory_pct <= Decimal("1")):
         raise ValueError("MAX_BTC_INVENTORY_PCT must be in (0,1]")
+    if not (Decimal("0") < config.inventory_cap_min_pct <= Decimal("1")):
+        raise ValueError("INVENTORY_CAP_MIN_PCT must be in (0,1]")
+    if not (Decimal("0") < config.inventory_cap_max_pct <= Decimal("1")):
+        raise ValueError("INVENTORY_CAP_MAX_PCT must be in (0,1]")
     if config.dashboard_port <= 0:
         raise ValueError("DASHBOARD_PORT must be > 0")
     if config.paper_start_usd < 0 or config.paper_start_btc < 0:
@@ -545,6 +643,22 @@ def _ema(values: List[Decimal], period: int) -> Decimal:
         ema_val = (v * alpha) + (ema_val * (Decimal("1") - alpha))
     return ema_val
 
+
+
+def _atr(candles: List[Tuple[int, Decimal, Decimal, Decimal]], period: int) -> Decimal:
+    if period <= 0 or len(candles) <= period:
+        return Decimal("0")
+
+    true_ranges: List[Decimal] = []
+    prev_close = candles[0][3]
+    for _ts, high, low, close in candles[1:]:
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        true_ranges.append(tr)
+        prev_close = close
+
+    if len(true_ranges) < period:
+        return Decimal("0")
+    return sum(true_ranges[-period:], Decimal("0")) / Decimal(period)
 
 def _read_secret(var_name: str, file_var_name: str) -> Optional[str]:
     direct = os.getenv(var_name)
