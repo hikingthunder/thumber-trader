@@ -44,6 +44,15 @@ class BotConfig:
     target_net_profit_pct: Decimal = Decimal(os.getenv("TARGET_NET_PROFIT_PCT", "0.002"))
     poll_seconds: int = int(os.getenv("POLL_SECONDS", "60"))
 
+    # live fee adaptation
+    dynamic_fee_tracking_enabled: bool = os.getenv("DYNAMIC_FEE_TRACKING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    fee_refresh_seconds: int = int(os.getenv("FEE_REFRESH_SECONDS", "3600"))
+
+    # optional exchange-side bracket attachment for entry buys
+    use_exchange_bracket_orders: bool = os.getenv("USE_EXCHANGE_BRACKET_ORDERS", "false").strip().lower() in {"1", "true", "yes", "on"}
+    bracket_take_profit_pct: Decimal = Decimal(os.getenv("BRACKET_TAKE_PROFIT_PCT", "0.01"))
+    bracket_stop_loss_pct: Decimal = Decimal(os.getenv("BRACKET_STOP_LOSS_PCT", "0.01"))
+
     # grid shape
     grid_spacing_mode: str = os.getenv("GRID_SPACING_MODE", "arithmetic").strip().lower()
 
@@ -79,6 +88,9 @@ class BotConfig:
     paper_trading_mode: bool = os.getenv("PAPER_TRADING_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
     paper_start_usd: Decimal = Decimal(os.getenv("PAPER_START_USD", "1000"))
     paper_start_btc: Decimal = Decimal(os.getenv("PAPER_START_BTC", "0"))
+    paper_fill_exceed_pct: Decimal = Decimal(os.getenv("PAPER_FILL_EXCEED_PCT", "0.0001"))
+    paper_fill_delay_seconds: int = int(os.getenv("PAPER_FILL_DELAY_SECONDS", "5"))
+    paper_slippage_pct: Decimal = Decimal(os.getenv("PAPER_SLIPPAGE_PCT", "0.0001"))
 
     # local dashboard
     dashboard_enabled: bool = os.getenv("DASHBOARD_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -111,13 +123,23 @@ class GridBot:
             "USD": self.config.paper_start_usd,
             "BTC": self.config.paper_start_btc,
         }
+        self._effective_maker_fee_pct = self.config.maker_fee_pct
+        self._last_fee_refresh_ts = 0.0
+        self._daily_realized_pnl = Decimal("0")
+        self._daily_turnover_usd = Decimal("0")
+        self._daily_day_index = int(time.time() // 86400)
+        self._paper_inventory_cost_usd = self.config.paper_start_btc * self.grid_anchor_price
+        self._emergency_stop_triggered = False
 
     def run(self) -> None:
         if self.config.dashboard_enabled:
             self._start_dashboard_server()
         self._load_product_metadata()
+        self._refresh_maker_fee(force=True)
         current_price = self._get_current_price()
         self.grid_anchor_price = current_price
+        if self.config.paper_trading_mode and self.config.paper_start_btc > 0:
+            self._paper_inventory_cost_usd = self.config.paper_start_btc * current_price
         self.grid_levels = self._build_grid_levels(current_price)
 
         if not self.orders:
@@ -130,6 +152,7 @@ class GridBot:
         while self._running:
             try:
                 current_price = self._get_current_price()
+                self._refresh_maker_fee()
                 trend_bias = self._get_trend_bias()
                 with self._state_lock:
                     self.loop_count += 1
@@ -170,7 +193,7 @@ class GridBot:
 
         min_required_step_pct = max(
             self.config.min_grid_profit_pct,
-            (self.config.maker_fee_pct * Decimal("2")) + self.config.target_net_profit_pct,
+            (self._effective_maker_fee_pct * Decimal("2")) + self.config.target_net_profit_pct,
         )
 
         if self.config.grid_spacing_mode == "geometric":
@@ -290,9 +313,13 @@ class GridBot:
 
         side = str(record["side"]).upper()
         price = Decimal(str(record["price"]))
-        if side == "BUY" and current_price <= price:
+        if time.time() < float(record.get("eligible_fill_ts", 0)):
+            return "OPEN"
+
+        exceed = self.config.paper_fill_exceed_pct
+        if side == "BUY" and current_price <= price * (Decimal("1") - exceed):
             return "FILLED"
-        if side == "SELL" and current_price >= price:
+        if side == "SELL" and current_price >= price * (Decimal("1") + exceed):
             return "FILLED"
         return "OPEN"
 
@@ -320,6 +347,10 @@ class GridBot:
                 current_price,
                 self._q_price(stop_price),
             )
+            if not self._emergency_stop_triggered and self.orders:
+                self._emergency_stop_triggered = True
+                self._add_event("Hard stop breached: cancelling outstanding orders in batch")
+                self._cancel_open_orders_batch()
 
     def _place_grid_order(
         self,
@@ -378,6 +409,18 @@ class GridBot:
                 }
             },
         }
+        if (
+            not self.config.paper_trading_mode
+            and side == "BUY"
+            and self.config.use_exchange_bracket_orders
+        ):
+            payload["attached_order_configuration"] = {
+                "trigger_bracket_gtc": {
+                    "base_size": format(base_size, "f"),
+                    "limit_price": format(self._q_price(price * (Decimal("1") + self.config.bracket_take_profit_pct)), "f"),
+                    "stop_trigger_price": format(self._q_price(price * (Decimal("1") - self.config.bracket_stop_loss_pct)), "f"),
+                }
+            }
         if self.config.paper_trading_mode:
             order_id = f"paper-{uuid.uuid4()}"
         else:
@@ -390,12 +433,15 @@ class GridBot:
             if not order_id:
                 raise RuntimeError(f"Order id missing from response: {response}")
 
+        now_ts = time.time()
         self.orders[order_id] = {
             "side": side,
             "price": str(price),
             "base_size": str(base_size),
             "grid_index": grid_index,
             "product_id": self.config.product_id,
+            "created_ts": now_ts,
+            "eligible_fill_ts": now_ts + self.config.paper_fill_delay_seconds,
         }
         logging.info("Placed %s LIMIT post-only: %s @ %s", side, base_size, price)
         self._add_event(f"{side} order placed @ {price} (id={order_id[:12]})")
@@ -519,18 +565,108 @@ class GridBot:
     def _apply_fill_to_paper_balances(self, side: str, base_size: Decimal, price: Decimal) -> None:
         if not self.config.paper_trading_mode:
             return
-        notional = base_size * price
+
+        self._roll_daily_metrics_window()
+        slippage = self.config.paper_slippage_pct
+        exec_price = price * (Decimal("1") + slippage if side == "BUY" else Decimal("1") - slippage)
+        exec_price = self._q_price(exec_price)
+        notional = base_size * exec_price
+        fee_paid = notional * self._effective_maker_fee_pct
+        self._daily_turnover_usd += notional
+
         if side == "BUY":
-            self.paper_balances["USD"] = self.paper_balances["USD"] - notional
+            self.paper_balances["USD"] = self.paper_balances["USD"] - notional - fee_paid
             self.paper_balances["BTC"] = self.paper_balances["BTC"] + base_size
+            self._paper_inventory_cost_usd += notional + fee_paid
         elif side == "SELL":
-            self.paper_balances["USD"] = self.paper_balances["USD"] + notional
+            btc_before = self.paper_balances["BTC"]
+            avg_cost = (self._paper_inventory_cost_usd / btc_before) if btc_before > 0 else Decimal("0")
+            cost_basis = avg_cost * base_size
+            proceeds = notional - fee_paid
+            self.paper_balances["USD"] = self.paper_balances["USD"] + proceeds
             self.paper_balances["BTC"] = self.paper_balances["BTC"] - base_size
+            self._paper_inventory_cost_usd = max(Decimal("0"), self._paper_inventory_cost_usd - cost_basis)
+            self._daily_realized_pnl += proceeds - cost_basis
 
     def _add_event(self, message: str) -> None:
         with self._state_lock:
             self.recent_events.append(f"{time.strftime('%H:%M:%S')} | {message}")
             self.recent_events = self.recent_events[-25:]
+
+    def _roll_daily_metrics_window(self) -> None:
+        day_idx = int(time.time() // 86400)
+        if day_idx != self._daily_day_index:
+            self._daily_day_index = day_idx
+            self._daily_realized_pnl = Decimal("0")
+            self._daily_turnover_usd = Decimal("0")
+
+    def _refresh_maker_fee(self, force: bool = False) -> None:
+        if not self.config.dynamic_fee_tracking_enabled or self.config.paper_trading_mode:
+            self._effective_maker_fee_pct = self.config.maker_fee_pct
+            return
+
+        now = time.time()
+        if not force and now - self._last_fee_refresh_ts < self.config.fee_refresh_seconds:
+            return
+
+        self._last_fee_refresh_ts = now
+        try:
+            fetcher = getattr(self.client, "get_transaction_summary", None)
+            payload = _as_dict(fetcher()) if callable(fetcher) else {}
+            maker = _find_decimal(payload, ["maker_fee_rate", "maker_fee", "maker_fee_rate_bps"])
+            if maker is not None:
+                if maker > Decimal("1"):
+                    maker = maker / Decimal("10000")
+                self._effective_maker_fee_pct = maker
+                logging.info("Fee tracker updated maker fee to %.4f%%", float(maker * 100))
+            else:
+                self._effective_maker_fee_pct = self.config.maker_fee_pct
+        except Exception as exc:
+            logging.warning("Fee refresh failed (%s); falling back to configured MAKER_FEE_PCT.", exc)
+            self._effective_maker_fee_pct = self.config.maker_fee_pct
+
+    def _cancel_open_orders_batch(self) -> None:
+        if self.config.paper_trading_mode:
+            self.orders.clear()
+            return
+
+        order_ids = list(self.orders.keys())
+        if not order_ids:
+            return
+
+        try:
+            self.client.cancel_orders(order_ids=order_ids)
+        except Exception:
+            logging.warning("Batch cancel unavailable, falling back to single-order cancellation.")
+            for order_id in order_ids:
+                try:
+                    self.client.cancel_orders(order_ids=[order_id])
+                except Exception as exc:
+                    logging.warning("Failed to cancel order %s: %s", order_id, exc)
+        self.orders.clear()
+
+    def _risk_metrics(self) -> Dict[str, str]:
+        candles = self._fetch_public_candles()
+        closes = [c[3] for c in candles]
+        if len(closes) < 3:
+            return {"var_95_24h_pct": "0", "cvar_95_24h_pct": "0"}
+
+        returns: List[Decimal] = []
+        for prev, cur in zip(closes, closes[1:]):
+            if prev > 0:
+                returns.append((cur - prev) / prev)
+        if not returns:
+            return {"var_95_24h_pct": "0", "cvar_95_24h_pct": "0"}
+
+        returns.sort()
+        idx = max(0, int((len(returns) - 1) * 0.05))
+        var = returns[idx]
+        tail = returns[: idx + 1]
+        cvar = sum(tail, Decimal("0")) / Decimal(len(tail))
+        return {
+            "var_95_24h_pct": str(var),
+            "cvar_95_24h_pct": str(cvar),
+        }
 
     def _status_snapshot(self) -> Dict[str, Any]:
         with self._state_lock:
@@ -538,6 +674,11 @@ class GridBot:
             usd_bal = self._get_available_balance("USD")
             btc_bal = self._get_available_balance("BTC")
             portfolio = usd_bal + (btc_bal * price if price > 0 else Decimal("0"))
+            self._roll_daily_metrics_window()
+            capital_used = max(Decimal("1"), portfolio)
+            pnl_per_1k = (self._daily_realized_pnl / capital_used) * Decimal("1000")
+            turnover_ratio = self._daily_turnover_usd / capital_used
+            risk = self._risk_metrics()
             return {
                 "product_id": self.config.product_id,
                 "paper_trading_mode": self.config.paper_trading_mode,
@@ -551,6 +692,11 @@ class GridBot:
                 "portfolio_value_usd": str(portfolio),
                 "inventory_cap_pct": str(self._active_inventory_cap_pct),
                 "trend_strength": str(self._cached_trend_strength),
+                "maker_fee_pct": str(self._effective_maker_fee_pct),
+                "daily_realized_pnl_usd": str(self._daily_realized_pnl),
+                "daily_pnl_per_1k": str(pnl_per_1k),
+                "daily_turnover_ratio": str(turnover_ratio),
+                "risk_metrics": risk,
                 "recent_events": list(self.recent_events),
                 "orders": self.orders,
             }
@@ -602,6 +748,8 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("GRID_LINES must be >= 2")
     if config.poll_seconds < 5:
         raise ValueError("POLL_SECONDS must be >= 5")
+    if config.fee_refresh_seconds < 60:
+        raise ValueError("FEE_REFRESH_SECONDS must be >= 60")
     if config.grid_spacing_mode not in {"arithmetic", "geometric"}:
         raise ValueError("GRID_SPACING_MODE must be arithmetic or geometric")
     if config.maker_fee_pct < 0 or config.target_net_profit_pct < 0:
@@ -612,12 +760,18 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("ATR_BAND_MULTIPLIER must be > 0")
     if not (Decimal("0") < config.atr_min_band_pct <= config.atr_max_band_pct < Decimal("1")):
         raise ValueError("ATR_MIN_BAND_PCT and ATR_MAX_BAND_PCT must satisfy 0 < min <= max < 1")
+    if config.bracket_take_profit_pct < 0 or config.bracket_stop_loss_pct < 0:
+        raise ValueError("Bracket TP/SL percentages must be >= 0")
     if config.base_order_notional_usd <= 0:
         raise ValueError("BASE_ORDER_NOTIONAL_USD must be > 0")
     if config.min_notional_usd <= 0:
         raise ValueError("MIN_NOTIONAL_USD must be > 0")
     if not (Decimal("0") <= config.quote_reserve_pct < Decimal("1")):
         raise ValueError("QUOTE_RESERVE_PCT must be in [0,1)")
+    if config.paper_fill_delay_seconds < 0:
+        raise ValueError("PAPER_FILL_DELAY_SECONDS must be >= 0")
+    if config.paper_fill_exceed_pct < 0 or config.paper_slippage_pct < 0:
+        raise ValueError("Paper simulation percentages must be >= 0")
     if not (Decimal("0") < config.max_btc_inventory_pct <= Decimal("1")):
         raise ValueError("MAX_BTC_INVENTORY_PCT must be in (0,1]")
     if not (Decimal("0") < config.inventory_cap_min_pct <= Decimal("1")):
@@ -674,6 +828,27 @@ def _read_secret(var_name: str, file_var_name: str) -> Optional[str]:
     if mode & (stat.S_IRWXG | stat.S_IRWXO):
         raise PermissionError(f"Secret file {path} must not be group/world accessible")
     return path.read_text().strip()
+
+
+
+def _find_decimal(payload: Any, candidate_keys: List[str]) -> Optional[Decimal]:
+    if isinstance(payload, dict):
+        for key in candidate_keys:
+            if key in payload:
+                try:
+                    return Decimal(str(payload[key]))
+                except Exception:
+                    pass
+        for value in payload.values():
+            found = _find_decimal(value, candidate_keys)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_decimal(item, candidate_keys)
+            if found is not None:
+                return found
+    return None
 
 
 def _as_dict(response: Any) -> Dict[str, Any]:

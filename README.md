@@ -15,6 +15,10 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Places **post-only** limit orders (maker intent).
 - Saves open order state to `orders.json` so restart recovery works.
 - Polls every 60 seconds by default, detects fills, and places replacement orders.
+- Supports optional exchange-side attached bracket exits for BUY entries.
+- Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
+- Enhances paper trading with queue-delay, exceed-threshold, and slippage simulation.
+- Exposes daily normalized PnL, turnover, and VaR/CVaR risk metrics in dashboard status.
 - Applies risk controls (USD reserve, BTC inventory cap, stop-loss awareness).
 - Adds trend bias (EMA fast/slow over Coinbase candles) to be more defensive in downtrends.
 
@@ -86,6 +90,14 @@ MAKER_FEE_PCT=0.004
 TARGET_NET_PROFIT_PCT=0.002
 POLL_SECONDS=60
 
+DYNAMIC_FEE_TRACKING_ENABLED=true
+FEE_REFRESH_SECONDS=3600
+
+# Optional native bracket attachment (BUY entries only)
+USE_EXCHANGE_BRACKET_ORDERS=false
+BRACKET_TAKE_PROFIT_PCT=0.01
+BRACKET_STOP_LOSS_PCT=0.01
+
 # Grid model: arithmetic|geometric
 GRID_SPACING_MODE=arithmetic
 
@@ -105,6 +117,11 @@ DASHBOARD_PORT=8080
 PAPER_TRADING_MODE=false
 PAPER_START_USD=1000
 PAPER_START_BTC=0
+
+# Paper fill realism controls
+PAPER_FILL_EXCEED_PCT=0.0001
+PAPER_FILL_DELAY_SECONDS=5
+PAPER_SLIPPAGE_PCT=0.0001
 
 BASE_ORDER_NOTIONAL_USD=10
 QUOTE_RESERVE_PCT=0.25
