@@ -84,6 +84,8 @@ COINBASE_API_KEY_FILE=/opt/thumber-trader/secrets/cb_api_key
 COINBASE_API_SECRET_FILE=/opt/thumber-trader/secrets/cb_api_secret
 
 PRODUCT_ID=BTC-USD
+# Optional multi-asset mode (comma-separated). Example: BTC-USD,ETH-USD,SOL-USD
+PRODUCT_IDS=BTC-USD
 GRID_LINES=8
 GRID_BAND_PCT=0.15
 MIN_NOTIONAL_USD=6
@@ -119,6 +121,9 @@ DASHBOARD_PORT=8080
 PAPER_TRADING_MODE=false
 PAPER_START_USD=1000
 PAPER_START_BTC=0
+# Alias used by multi-asset engines for each product base currency in paper mode
+PAPER_START_BASE=0
+SHARED_USD_RESERVE_ENABLED=true
 
 # Paper fill realism controls
 PAPER_FILL_EXCEED_PCT=0.0001

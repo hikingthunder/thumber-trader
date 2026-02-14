@@ -25,7 +25,7 @@ import urllib.request
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_DOWN, getcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,6 +43,7 @@ getcontext().prec = 28
 @dataclass
 class BotConfig:
     product_id: str = os.getenv("PRODUCT_ID", "BTC-USD")
+    product_ids: str = os.getenv("PRODUCT_IDS", os.getenv("PRODUCT_ID", "BTC-USD"))
     grid_lines: int = int(os.getenv("GRID_LINES", "8"))
     grid_band_pct: Decimal = Decimal(os.getenv("GRID_BAND_PCT", "0.15"))
     min_notional_usd: Decimal = Decimal(os.getenv("MIN_NOTIONAL_USD", "6"))
@@ -95,6 +96,7 @@ class BotConfig:
     paper_trading_mode: bool = os.getenv("PAPER_TRADING_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
     paper_start_usd: Decimal = Decimal(os.getenv("PAPER_START_USD", "1000"))
     paper_start_btc: Decimal = Decimal(os.getenv("PAPER_START_BTC", "0"))
+    paper_start_base: Decimal = Decimal(os.getenv("PAPER_START_BASE", os.getenv("PAPER_START_BTC", "0")))
     paper_fill_exceed_pct: Decimal = Decimal(os.getenv("PAPER_FILL_EXCEED_PCT", "0.0001"))
     paper_fill_delay_seconds: int = int(os.getenv("PAPER_FILL_DELAY_SECONDS", "5"))
     paper_slippage_pct: Decimal = Decimal(os.getenv("PAPER_SLIPPAGE_PCT", "0.0001"))
@@ -120,12 +122,40 @@ class BotConfig:
     # safe start
     safe_start_enabled: bool = os.getenv("SAFE_START_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     base_buy_mode: str = os.getenv("BASE_BUY_MODE", "off").strip().lower()
+    shared_usd_reserve_enabled: bool = os.getenv("SHARED_USD_RESERVE_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+class SharedPaperPortfolio:
+    def __init__(self, usd: Decimal):
+        self.balances: Dict[str, Decimal] = {"USD": usd}
+        self.lock = threading.RLock()
+
+    def get_balance(self, currency: str) -> Decimal:
+        with self.lock:
+            return self.balances.get(currency, Decimal("0"))
+
+    def apply_delta(self, currency: str, delta: Decimal) -> None:
+        with self.lock:
+            self.balances[currency] = self.balances.get(currency, Decimal("0")) + delta
 
 
 class GridBot:
-    def __init__(self, client: Any, config: BotConfig, orders_path: Path):
+    def __init__(
+        self,
+        client: Any,
+        config: BotConfig,
+        orders_path: Path,
+        shared_paper_portfolio: Optional[SharedPaperPortfolio] = None,
+    ):
         self.client = client
         self.config = config
+        self.base_currency = self.config.product_id.split("-")[0]
+        self.shared_paper_portfolio = shared_paper_portfolio
         self.orders_path = orders_path
         self.orders: Dict[str, Dict[str, Any]] = self._load_orders()
         self._running = True
@@ -145,17 +175,18 @@ class GridBot:
         self._ws_client: Optional[Any] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._cached_trend_strength = Decimal("0")
+        self._cached_atr_pct = Decimal("0")
         self._active_inventory_cap_pct = self.config.max_btc_inventory_pct
         self.paper_balances = {
             "USD": self.config.paper_start_usd,
-            "BTC": self.config.paper_start_btc,
+            self.base_currency: self.config.paper_start_base,
         }
         self._effective_maker_fee_pct = self.config.maker_fee_pct
         self._last_fee_refresh_ts = 0.0
         self._daily_realized_pnl = Decimal("0")
         self._daily_turnover_usd = Decimal("0")
         self._daily_day_index = int(time.time() // 86400)
-        self._paper_inventory_cost_usd = self.config.paper_start_btc * self.grid_anchor_price
+        self._paper_inventory_cost_usd = self.config.paper_start_base * self.grid_anchor_price
         self._emergency_stop_triggered = False
         self._db = sqlite3.connect(self.config.state_db_path, check_same_thread=False)
         self._db_lock = threading.RLock()
@@ -170,8 +201,8 @@ class GridBot:
         self._refresh_maker_fee(force=True)
         current_price = self._get_current_price()
         self.grid_anchor_price = current_price
-        if self.config.paper_trading_mode and self.config.paper_start_btc > 0:
-            self._paper_inventory_cost_usd = self.config.paper_start_btc * current_price
+        if self.config.paper_trading_mode and self.config.paper_start_base > 0:
+            self._paper_inventory_cost_usd = self.config.paper_start_base * current_price
         self.grid_levels = self._build_grid_levels(current_price)
         self._run_safe_start_checks(current_price)
 
@@ -395,7 +426,7 @@ class GridBot:
             sell_levels = sell_levels[:]
 
         usd_available = self._get_available_balance("USD")
-        btc_available = self._get_available_balance("BTC")
+        base_available = self._get_available_balance(self.base_currency)
         deployable_usd = usd_available * (Decimal("1") - self.config.quote_reserve_pct)
 
         buy_budget_per_order = max(self.config.min_notional_usd, self.config.base_order_notional_usd)
@@ -405,12 +436,12 @@ class GridBot:
         for level in buy_levels:
             self._place_grid_order(side="BUY", price=level, usd_notional=buy_budget_per_order)
 
-        if sell_levels and btc_available > Decimal("0"):
-            btc_per_sell = self._q_base(btc_available / Decimal(len(sell_levels)))
+        if sell_levels and base_available > Decimal("0"):
+            base_per_sell = self._q_base(base_available / Decimal(len(sell_levels)))
             for level in sell_levels:
-                if btc_per_sell * level < self.config.min_notional_usd:
+                if base_per_sell * level < self.config.min_notional_usd:
                     continue
-                self._place_grid_order(side="SELL", price=level, base_size=btc_per_sell)
+                self._place_grid_order(side="SELL", price=level, base_size=base_per_sell)
 
         logging.info("Initial grid placed with trend bias=%s (buys=%s sells=%s).", trend_bias, len(buy_levels), len(sell_levels))
 
@@ -472,18 +503,19 @@ class GridBot:
 
     def _risk_monitor(self, current_price: Decimal) -> None:
         usd_bal = self._get_available_balance("USD")
-        btc_bal = self._get_available_balance("BTC")
-        btc_notional = btc_bal * current_price
-        portfolio_value = usd_bal + btc_notional
+        base_bal = self._get_available_balance(self.base_currency)
+        base_notional = base_bal * current_price
+        portfolio_value = usd_bal + base_notional
 
         if portfolio_value <= Decimal("0"):
             return
 
-        btc_ratio = btc_notional / portfolio_value
-        if btc_ratio > self._active_inventory_cap_pct:
+        base_ratio = base_notional / portfolio_value
+        if base_ratio > self._active_inventory_cap_pct:
             logging.warning(
-                "Risk: BTC inventory %.2f%% exceeds limit %.2f%%. New buy placements are throttled.",
-                float(btc_ratio * 100),
+                "Risk: %s inventory %.2f%% exceeds limit %.2f%%. New buy placements are throttled.",
+                self.base_currency,
+                float(base_ratio * 100),
                 float(self._active_inventory_cap_pct * 100),
             )
 
@@ -516,9 +548,9 @@ class GridBot:
             if usd_notional is None:
                 raise ValueError("usd_notional is required for BUY")
 
-            # Exposure gate: do not add BTC if portfolio already BTC-heavy.
+            # Exposure gate: do not add base asset if portfolio is already base-heavy.
             if self._btc_inventory_ratio(price) > self._active_inventory_cap_pct:
-                logging.warning("Skipped BUY at %s due to BTC inventory cap.", price)
+                logging.warning("Skipped BUY at %s due to %s inventory cap.", price, self.base_currency)
                 return None
 
             usd_notional = max(usd_notional, self.config.min_notional_usd)
@@ -533,8 +565,8 @@ class GridBot:
             if base_size is None:
                 raise ValueError("base_size is required for SELL")
             base_size = self._q_base(base_size)
-            if self.config.paper_trading_mode and base_size > self._get_available_balance("BTC"):
-                logging.warning("Skipped SELL at %s in paper mode; insufficient BTC.", price)
+            if self.config.paper_trading_mode and base_size > self._get_available_balance(self.base_currency):
+                logging.warning("Skipped SELL at %s in paper mode; insufficient %s.", price, self.base_currency)
                 return None
         else:
             raise ValueError(f"Unsupported side {side}")
@@ -596,13 +628,15 @@ class GridBot:
 
     def _btc_inventory_ratio(self, ref_price: Decimal) -> Decimal:
         usd_bal = self._get_available_balance("USD")
-        btc_bal = self._get_available_balance("BTC")
-        btc_notional = btc_bal * ref_price
-        total = usd_bal + btc_notional
-        return Decimal("0") if total <= 0 else btc_notional / total
+        base_bal = self._get_available_balance(self.base_currency)
+        base_notional = base_bal * ref_price
+        total = usd_bal + base_notional
+        return Decimal("0") if total <= 0 else base_notional / total
 
     def _get_trend_bias(self) -> str:
-        closes = self._fetch_public_candle_closes()
+        candles = self._fetch_public_candles()
+        closes = [c[3] for c in candles]
+        self._cached_atr_pct = self._estimate_atr_pct(candles)
         if len(closes) < max(self.config.trend_ema_fast, self.config.trend_ema_slow):
             logging.info("Trend data unavailable/insufficient; using NEUTRAL bias.")
             self._cached_trend_strength = Decimal("0")
@@ -629,6 +663,27 @@ class GridBot:
     def _fetch_public_candle_closes(self) -> List[Decimal]:
         candles = self._fetch_public_candles()
         return [c[3] for c in candles]
+
+    def _estimate_atr_pct(self, candles: List[Tuple[int, Decimal, Decimal, Decimal]]) -> Decimal:
+        period = max(1, self.config.atr_period)
+        if len(candles) < period + 1:
+            return Decimal("0")
+        trs: List[Decimal] = []
+        prev_close = candles[0][3]
+        for _ts, high, low, close in candles[1:]:
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            trs.append(tr)
+            prev_close = close
+        window = trs[-period:]
+        if not window:
+            return Decimal("0")
+        atr = sum(window, Decimal("0")) / Decimal(len(window))
+        close = candles[-1][3]
+        return Decimal("0") if close <= 0 else atr / close
+
+    def ranging_score(self) -> Decimal:
+        trend_strength = abs(self._cached_trend_strength)
+        return max(Decimal("0"), self._cached_atr_pct - trend_strength)
 
     def _fetch_public_candles(self) -> List[Tuple[int, Decimal, Decimal, Decimal]]:
         params = urllib.parse.urlencode(
@@ -678,6 +733,8 @@ class GridBot:
 
     def _get_available_balance(self, currency: str) -> Decimal:
         if self.config.paper_trading_mode:
+            if self.shared_paper_portfolio is not None:
+                return self.shared_paper_portfolio.get_balance(currency)
             return self.paper_balances.get(currency, Decimal("0"))
 
         payload = _as_dict(self.client.get_accounts())
@@ -727,16 +784,22 @@ class GridBot:
         self._daily_turnover_usd += notional
 
         if side == "BUY":
-            self.paper_balances["USD"] = self.paper_balances["USD"] - notional - fee_paid
-            self.paper_balances["BTC"] = self.paper_balances["BTC"] + base_size
+            if self.shared_paper_portfolio is not None:
+                self.shared_paper_portfolio.apply_delta("USD", -(notional + fee_paid))
+                self.shared_paper_portfolio.apply_delta(self.base_currency, base_size)
+            self.paper_balances["USD"] = self.paper_balances.get("USD", Decimal("0")) - notional - fee_paid
+            self.paper_balances[self.base_currency] = self.paper_balances.get(self.base_currency, Decimal("0")) + base_size
             self._paper_inventory_cost_usd += notional + fee_paid
         elif side == "SELL":
-            btc_before = self.paper_balances["BTC"]
-            avg_cost = (self._paper_inventory_cost_usd / btc_before) if btc_before > 0 else Decimal("0")
+            base_before = self.paper_balances.get(self.base_currency, Decimal("0"))
+            avg_cost = (self._paper_inventory_cost_usd / base_before) if base_before > 0 else Decimal("0")
             cost_basis = avg_cost * base_size
             proceeds = notional - fee_paid
-            self.paper_balances["USD"] = self.paper_balances["USD"] + proceeds
-            self.paper_balances["BTC"] = self.paper_balances["BTC"] - base_size
+            if self.shared_paper_portfolio is not None:
+                self.shared_paper_portfolio.apply_delta("USD", proceeds)
+                self.shared_paper_portfolio.apply_delta(self.base_currency, -base_size)
+            self.paper_balances["USD"] = self.paper_balances.get("USD", Decimal("0")) + proceeds
+            self.paper_balances[self.base_currency] = self.paper_balances.get(self.base_currency, Decimal("0")) - base_size
             self._paper_inventory_cost_usd = max(Decimal("0"), self._paper_inventory_cost_usd - cost_basis)
             self._daily_realized_pnl += proceeds - cost_basis
 
@@ -900,8 +963,8 @@ class GridBot:
         with self._state_lock:
             price = self.last_price
             usd_bal = self._get_available_balance("USD")
-            btc_bal = self._get_available_balance("BTC")
-            portfolio = usd_bal + (btc_bal * price if price > 0 else Decimal("0"))
+            base_bal = self._get_available_balance(self.base_currency)
+            portfolio = usd_bal + (base_bal * price if price > 0 else Decimal("0"))
             self._roll_daily_metrics_window()
             capital_used = max(Decimal("1"), portfolio)
             pnl_per_1k = (self._daily_realized_pnl / capital_used) * Decimal("1000")
@@ -916,10 +979,12 @@ class GridBot:
                 "trend_bias": self.last_trend_bias,
                 "active_orders": len(self.orders),
                 "fills": self.fill_count,
-                "balances": {"USD": str(usd_bal), "BTC": str(btc_bal)},
+                "balances": {"USD": str(usd_bal), self.base_currency: str(base_bal)},
                 "portfolio_value_usd": str(portfolio),
                 "inventory_cap_pct": str(self._active_inventory_cap_pct),
                 "trend_strength": str(self._cached_trend_strength),
+                "atr_pct": str(self._cached_atr_pct),
+                "ranging_score": str(self.ranging_score()),
                 "maker_fee_pct": str(self._effective_maker_fee_pct),
                 "daily_realized_pnl_usd": str(self._daily_realized_pnl),
                 "daily_pnl_per_1k": str(pnl_per_1k),
@@ -1264,8 +1329,8 @@ class GridBot:
 
     def _record_daily_stats_snapshot(self, current_price: Decimal) -> None:
         usd_bal = self._get_available_balance("USD")
-        btc_bal = self._get_available_balance("BTC")
-        portfolio = usd_bal + (btc_bal * current_price if current_price > 0 else Decimal("0"))
+        base_bal = self._get_available_balance(self.base_currency)
+        portfolio = usd_bal + (base_bal * current_price if current_price > 0 else Decimal("0"))
         capital_used = max(Decimal("1"), portfolio)
         pnl_per_1k = (self._daily_realized_pnl / capital_used) * Decimal("1000")
         turnover_ratio = self._daily_turnover_usd / capital_used
@@ -1307,14 +1372,14 @@ class GridBot:
         needed_btc = Decimal("0")
         if sell_levels > 0:
             needed_btc = (self.config.base_order_notional_usd / current_price) * Decimal(sell_levels)
-        btc_bal = self._get_available_balance("BTC")
-        if btc_bal < needed_btc:
+        base_bal = self._get_available_balance(self.base_currency)
+        if base_bal < needed_btc:
             if self.config.base_buy_mode == "auto":
-                shortfall = needed_btc - btc_bal
+                shortfall = needed_btc - base_bal
                 self._execute_base_buy(shortfall, current_price)
             else:
                 raise ValueError(
-                    f"Safe-start failed: BTC balance {btc_bal} < required sell-side inventory {needed_btc}. "
+                    f"Safe-start failed: {self.base_currency} balance {base_bal} < required sell-side inventory {needed_btc}. "
                     "Set BASE_BUY_MODE=auto to acquire initial base inventory."
                 )
 
@@ -1324,7 +1389,7 @@ class GridBot:
         quote_size = self._q_price(base_size * current_price)
         if self.config.paper_trading_mode:
             self.paper_balances["USD"] -= quote_size
-            self.paper_balances["BTC"] += base_size
+            self.paper_balances[self.base_currency] += base_size
             self._add_event(f"Auto base-buy (paper): {base_size} BTC")
             return
         payload = {
@@ -1374,12 +1439,14 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("INVENTORY_CAP_MAX_PCT must be in (0,1]")
     if config.dashboard_port <= 0:
         raise ValueError("DASHBOARD_PORT must be > 0")
-    if config.paper_start_usd < 0 or config.paper_start_btc < 0:
-        raise ValueError("PAPER_START_USD and PAPER_START_BTC must be >= 0")
+    if config.paper_start_usd < 0 or config.paper_start_btc < 0 or config.paper_start_base < 0:
+        raise ValueError("PAPER_START_USD, PAPER_START_BTC, and PAPER_START_BASE must be >= 0")
     if config.trailing_trigger_levels < 1:
         raise ValueError("TRAILING_TRIGGER_LEVELS must be >= 1")
     if config.base_buy_mode not in {"off", "auto"}:
         raise ValueError("BASE_BUY_MODE must be off or auto")
+    if not any(item.strip() for item in config.product_ids.replace(";", ",").split(",")):
+        raise ValueError("PRODUCT_IDS must include at least one product id")
 
 
 def _orders_path() -> Path:
@@ -1503,6 +1570,66 @@ def _as_dict(response: Any) -> Dict[str, Any]:
     raise TypeError(f"Unsupported response type: {type(response)!r}")
 
 
+class GridManager:
+    def __init__(self, client: Any, config: BotConfig):
+        self.client = client
+        self.config = config
+        self.engines: List[GridBot] = []
+
+    def _product_ids(self) -> List[str]:
+        raw = self.config.product_ids or self.config.product_id
+        ids = [item.strip().upper() for item in raw.replace(";", ",").split(",") if item.strip()]
+        return ids or [self.config.product_id]
+
+    def _orders_path_for(self, product_id: str) -> Path:
+        base = _orders_path()
+        if len(self._product_ids()) <= 1:
+            return base
+        return base.with_name(f"{base.stem}_{product_id.lower()}{base.suffix}")
+
+    def _db_path_for(self, product_id: str) -> str:
+        base = Path(self.config.state_db_path)
+        if len(self._product_ids()) <= 1:
+            return str(base)
+        return str(base.with_name(f"{base.stem}_{product_id.lower()}{base.suffix}"))
+
+    def _shared_paper_portfolio(self) -> Optional[SharedPaperPortfolio]:
+        if not self.config.paper_trading_mode or not self.config.shared_usd_reserve_enabled:
+            return None
+        portfolio = SharedPaperPortfolio(self.config.paper_start_usd)
+        for product_id in self._product_ids():
+            base = product_id.split("-")[0]
+            portfolio.apply_delta(base, self.config.paper_start_base)
+        return portfolio
+
+    async def run(self) -> None:
+        shared_portfolio = self._shared_paper_portfolio()
+        for product_id in self._product_ids():
+            engine_cfg = replace(self.config, product_id=product_id, state_db_path=self._db_path_for(product_id))
+            if shared_portfolio is not None:
+                engine_cfg = replace(engine_cfg, paper_start_usd=Decimal("0"), paper_start_base=Decimal("0"), paper_start_btc=Decimal("0"))
+            self.engines.append(
+                GridBot(
+                    client=self.client,
+                    config=engine_cfg,
+                    orders_path=self._orders_path_for(product_id),
+                    shared_paper_portfolio=shared_portfolio,
+                )
+            )
+
+        if len(self.engines) == 1:
+            await self.engines[0].run()
+            return
+
+        names = ", ".join(e.config.product_id for e in self.engines)
+        logging.info("GridManager starting %s engines: %s", len(self.engines), names)
+        await asyncio.gather(*(engine.run() for engine in self.engines))
+
+    def stop(self) -> None:
+        for engine in self.engines:
+            engine.stop()
+
+
 def build_client() -> Any:
     api_key = _read_secret("COINBASE_API_KEY", "COINBASE_API_KEY_FILE")
     api_secret = _read_secret("COINBASE_API_SECRET", "COINBASE_API_SECRET_FILE")
@@ -1531,15 +1658,15 @@ def main() -> None:
         return
 
     client = build_client()
-    bot = GridBot(client, config, _orders_path())
+    manager = GridManager(client, config)
 
     def _handle_signal(signum: int, _frame: Any) -> None:
         logging.info("Received signal %s, shutting down cleanly.", signum)
-        bot.stop()
+        manager.stop()
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
-    asyncio.run(bot.run())
+    asyncio.run(manager.run())
 
 
 if __name__ == "__main__":
