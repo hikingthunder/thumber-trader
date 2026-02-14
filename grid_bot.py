@@ -79,6 +79,9 @@ class BotConfig:
     quote_reserve_pct: Decimal = Decimal(os.getenv("QUOTE_RESERVE_PCT", "0.25"))
     max_btc_inventory_pct: Decimal = Decimal(os.getenv("MAX_BTC_INVENTORY_PCT", "0.65"))
     hard_stop_loss_pct: Decimal = Decimal(os.getenv("HARD_STOP_LOSS_PCT", "0.08"))
+    liquidity_depth_check_enabled: bool = os.getenv("LIQUIDITY_DEPTH_CHECK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    liquidity_depth_levels: int = int(os.getenv("LIQUIDITY_DEPTH_LEVELS", "50"))
+    liquidity_max_book_share_pct: Decimal = Decimal(os.getenv("LIQUIDITY_MAX_BOOK_SHARE_PCT", "0.20"))
 
     # trend signal controls
     trend_candle_granularity: str = os.getenv("TREND_GRANULARITY", "ONE_HOUR")
@@ -761,6 +764,9 @@ class GridBot:
             if base_size is None:
                 raise ValueError("base_size is required for SELL")
             base_size = self._q_base(base_size)
+            base_size = self._liquidity_adjusted_sell_size(price, base_size)
+            if base_size is None:
+                return None
             if self.config.paper_trading_mode and base_size > self._get_available_balance(self.base_currency):
                 logging.warning("Skipped SELL at %s in paper mode; insufficient %s.", price, self.base_currency)
                 return None
@@ -910,6 +916,112 @@ class GridBot:
         if self._market_regime == "TRENDING":
             adjusted = usd_notional * self.config.adx_trend_order_size_multiplier
         return max(self.config.min_notional_usd, adjusted)
+
+    def _liquidity_adjusted_sell_size(self, limit_price: Decimal, base_size: Decimal) -> Optional[Decimal]:
+        if not self.config.liquidity_depth_check_enabled or base_size <= 0:
+            return base_size
+
+        ref_price = self.last_price if self.last_price > 0 else self.grid_anchor_price
+        if ref_price <= 0:
+            ref_price = self._get_current_price()
+
+        ask_depth = self._fetch_cumulative_ask_depth(min(ref_price, limit_price), limit_price)
+        if ask_depth <= 0:
+            logging.warning("Skipped SELL at %s; no visible ask depth in level2 snapshot.", limit_price)
+            return None
+
+        capped = self._q_base(ask_depth * self.config.liquidity_max_book_share_pct)
+        if capped <= 0:
+            logging.warning("Skipped SELL at %s; liquidity cap collapsed below base increment.", limit_price)
+            return None
+
+        if base_size <= capped:
+            return base_size
+
+        if capped * limit_price < self.config.min_notional_usd:
+            logging.warning(
+                "Skipped SELL at %s; order-book cap %s falls below minimum notional %s.",
+                limit_price,
+                capped,
+                self.config.min_notional_usd,
+            )
+            return None
+
+        logging.info(
+            "Liquidity-aware sizing reduced SELL @ %s from %s to %s base units (visible asks=%s).",
+            limit_price,
+            base_size,
+            capped,
+            ask_depth,
+        )
+        return capped
+
+    def _fetch_cumulative_ask_depth(self, lower_price: Decimal, upper_price: Decimal) -> Decimal:
+        if upper_price <= 0 or lower_price >= upper_price:
+            return Decimal("0")
+
+        asks = self._fetch_level2_asks()
+        if not asks:
+            return Decimal("0")
+
+        total = Decimal("0")
+        for price, size in asks:
+            if price < lower_price:
+                continue
+            if price > upper_price:
+                break
+            total += size
+        return total
+
+    def _fetch_level2_asks(self) -> List[Tuple[Decimal, Decimal]]:
+        limit = max(1, self.config.liquidity_depth_levels)
+        endpoints = [
+            f"https://api.coinbase.com/api/v3/brokerage/product_book?product_id={self.config.product_id}&limit={limit}",
+            f"https://api.exchange.coinbase.com/products/{self.config.product_id}/book?level=2",
+        ]
+        for url in endpoints:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "thumber-trader/1.0"})
+                with self._coinbase_api_call("public_level2", urllib.request.urlopen, req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                continue
+
+            asks = self._parse_level2_asks(payload)
+            if asks:
+                return asks
+        logging.warning("Level2 depth fetch failed for %s.", self.config.product_id)
+        return []
+
+    def _parse_level2_asks(self, payload: Dict[str, Any]) -> List[Tuple[Decimal, Decimal]]:
+        raw_asks = payload.get("pricebook", {}).get("asks")
+        if raw_asks is None:
+            raw_asks = payload.get("asks", [])
+
+        parsed: List[Tuple[Decimal, Decimal]] = []
+        for level in raw_asks or []:
+            if isinstance(level, dict):
+                price_raw = level.get("price")
+                size_raw = level.get("size") or level.get("quantity")
+            elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                price_raw = level[0]
+                size_raw = level[1]
+            else:
+                continue
+
+            if price_raw is None or size_raw is None:
+                continue
+            try:
+                price = Decimal(str(price_raw))
+                size = Decimal(str(size_raw))
+            except Exception:
+                continue
+            if price <= 0 or size <= 0:
+                continue
+            parsed.append((price, size))
+
+        parsed.sort(key=lambda x: x[0])
+        return parsed
 
     def _fetch_public_candles(self) -> List[Tuple[int, Decimal, Decimal, Decimal]]:
         params = urllib.parse.urlencode(
@@ -1848,6 +1960,10 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("MIN_NOTIONAL_USD must be > 0")
     if not (Decimal("0") <= config.quote_reserve_pct < Decimal("1")):
         raise ValueError("QUOTE_RESERVE_PCT must be in [0,1)")
+    if config.liquidity_depth_levels < 1:
+        raise ValueError("LIQUIDITY_DEPTH_LEVELS must be >= 1")
+    if not (Decimal("0") < config.liquidity_max_book_share_pct <= Decimal("1")):
+        raise ValueError("LIQUIDITY_MAX_BOOK_SHARE_PCT must be in (0,1]")
     if config.paper_fill_delay_seconds < 0:
         raise ValueError("PAPER_FILL_DELAY_SECONDS must be >= 0")
     if config.paper_fill_exceed_pct < 0 or config.paper_slippage_pct < 0:
