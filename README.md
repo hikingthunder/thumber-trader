@@ -9,6 +9,9 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Uses a neutral grid anchor at startup.
 - Creates a default ±15% band around the startup price.
 - Uses 8 grid lines by default and enforces a minimum grid spacing floor.
+- Supports arithmetic or geometric spacing (`GRID_SPACING_MODE`).
+- Can auto-size grid bands using ATR (`ATR_ENABLED=true`).
+- Enforces fee-aware spacing floor via maker-fee + target-net-profit settings.
 - Places **post-only** limit orders (maker intent).
 - Saves open order state to `orders.json` so restart recovery works.
 - Polls every 60 seconds by default, detects fills, and places replacement orders.
@@ -79,7 +82,19 @@ GRID_LINES=8
 GRID_BAND_PCT=0.15
 MIN_NOTIONAL_USD=6
 MIN_GRID_PROFIT_PCT=0.015
+MAKER_FEE_PCT=0.004
+TARGET_NET_PROFIT_PCT=0.002
 POLL_SECONDS=60
+
+# Grid model: arithmetic|geometric
+GRID_SPACING_MODE=arithmetic
+
+# Optional ATR-adaptive grid band
+ATR_ENABLED=false
+ATR_PERIOD=14
+ATR_BAND_MULTIPLIER=4
+ATR_MIN_BAND_PCT=0.03
+ATR_MAX_BAND_PCT=0.35
 
 # Optional local dashboard
 DASHBOARD_ENABLED=true
@@ -95,6 +110,11 @@ BASE_ORDER_NOTIONAL_USD=10
 QUOTE_RESERVE_PCT=0.25
 MAX_BTC_INVENTORY_PCT=0.65
 HARD_STOP_LOSS_PCT=0.08
+
+# Optional dynamic inventory cap scaling by trend strength
+DYNAMIC_INVENTORY_CAP_ENABLED=false
+INVENTORY_CAP_MIN_PCT=0.30
+INVENTORY_CAP_MAX_PCT=0.80
 
 TREND_GRANULARITY=ONE_HOUR
 TREND_CANDLE_LIMIT=72
