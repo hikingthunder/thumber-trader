@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import bisect
+import contextlib
 import json
 import logging
 import os
@@ -138,6 +139,20 @@ class BotConfig:
         "on",
     }
 
+    # cross-asset risk controls
+    cross_asset_correlation_enabled: bool = os.getenv("CROSS_ASSET_CORRELATION_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    cross_asset_correlation_threshold: Decimal = Decimal(os.getenv("CROSS_ASSET_CORRELATION_THRESHOLD", "0.85"))
+    cross_asset_leader_inventory_trigger_pct: Decimal = Decimal(os.getenv("CROSS_ASSET_LEADER_INVENTORY_TRIGGER_PCT", "0.80"))
+    cross_asset_inventory_tightening_factor: Decimal = Decimal(os.getenv("CROSS_ASSET_INVENTORY_TIGHTENING_FACTOR", "0.65"))
+    cross_asset_inventory_min_pct: Decimal = Decimal(os.getenv("CROSS_ASSET_INVENTORY_MIN_PCT", "0.20"))
+    cross_asset_candle_lookback: int = int(os.getenv("CROSS_ASSET_CANDLE_LOOKBACK", "48"))
+    cross_asset_refresh_seconds: int = int(os.getenv("CROSS_ASSET_REFRESH_SECONDS", "300"))
+
 
 class SharedPaperPortfolio:
     def __init__(self, usd: Decimal):
@@ -153,6 +168,40 @@ class SharedPaperPortfolio:
             self.balances[currency] = self.balances.get(currency, Decimal("0")) + delta
 
 
+class SharedRiskState:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.cross_asset_inventory_caps: Dict[str, Decimal] = {}
+        self.pairwise_correlations: Dict[Tuple[str, str], Decimal] = {}
+        self.portfolio_beta = Decimal("0")
+
+    def set_inventory_cap(self, product_id: str, cap: Decimal) -> None:
+        with self.lock:
+            self.cross_asset_inventory_caps[product_id] = cap
+
+    def get_inventory_cap(self, product_id: str) -> Optional[Decimal]:
+        with self.lock:
+            return self.cross_asset_inventory_caps.get(product_id)
+
+    def set_correlation(self, left: str, right: str, value: Decimal) -> None:
+        key = tuple(sorted((left, right)))
+        with self.lock:
+            self.pairwise_correlations[key] = value
+
+    def get_correlation(self, left: str, right: str) -> Optional[Decimal]:
+        key = tuple(sorted((left, right)))
+        with self.lock:
+            return self.pairwise_correlations.get(key)
+
+    def set_portfolio_beta(self, beta: Decimal) -> None:
+        with self.lock:
+            self.portfolio_beta = beta
+
+    def get_portfolio_beta(self) -> Decimal:
+        with self.lock:
+            return self.portfolio_beta
+
+
 class GridBot:
     def __init__(
         self,
@@ -160,11 +209,13 @@ class GridBot:
         config: BotConfig,
         orders_path: Path,
         shared_paper_portfolio: Optional[SharedPaperPortfolio] = None,
+        shared_risk_state: Optional[SharedRiskState] = None,
     ):
         self.client = client
         self.config = config
         self.base_currency = self.config.product_id.split("-")[0]
         self.shared_paper_portfolio = shared_paper_portfolio
+        self.shared_risk_state = shared_risk_state
         self.orders_path = orders_path
         self._db = sqlite3.connect(self.config.state_db_path, check_same_thread=False)
         self._db_lock = threading.RLock()
@@ -620,12 +671,13 @@ class GridBot:
             return
 
         base_ratio = base_notional / portfolio_value
-        if base_ratio > self._active_inventory_cap_pct:
+        effective_cap = self._effective_inventory_cap_pct()
+        if base_ratio > effective_cap:
             logging.warning(
                 "Risk: %s inventory %.2f%% exceeds limit %.2f%%. New buy placements are throttled.",
                 self.base_currency,
                 float(base_ratio * 100),
-                float(self._active_inventory_cap_pct * 100),
+                float(effective_cap * 100),
             )
 
         stop_price = self.grid_anchor_price * (Decimal("1") - self.config.hard_stop_loss_pct)
@@ -658,7 +710,7 @@ class GridBot:
                 raise ValueError("usd_notional is required for BUY")
 
             # Exposure gate: do not add base asset if portfolio is already base-heavy.
-            if self._btc_inventory_ratio(price) > self._active_inventory_cap_pct:
+            if self._btc_inventory_ratio(price) > self._effective_inventory_cap_pct():
                 logging.warning("Skipped BUY at %s due to %s inventory cap.", price, self.base_currency)
                 return None
 
@@ -741,6 +793,14 @@ class GridBot:
         base_notional = base_bal * ref_price
         total = usd_bal + base_notional
         return Decimal("0") if total <= 0 else base_notional / total
+
+    def _effective_inventory_cap_pct(self) -> Decimal:
+        cap = self._active_inventory_cap_pct
+        if self.shared_risk_state is not None:
+            shared_cap = self.shared_risk_state.get_inventory_cap(self.config.product_id)
+            if shared_cap is not None:
+                cap = min(cap, shared_cap)
+        return cap
 
     def _get_trend_bias(self) -> str:
         candles = self._fetch_public_candles()
@@ -1101,6 +1161,7 @@ class GridBot:
             self._roll_daily_metrics_window()
             capital_used = max(Decimal("1"), portfolio)
             pnl_per_1k = (self._daily_realized_pnl / capital_used) * Decimal("1000")
+            portfolio_beta = self.shared_risk_state.get_portfolio_beta() if self.shared_risk_state is not None else Decimal("0")
             turnover_ratio = self._daily_turnover_usd / capital_used
             risk = self._risk_metrics()
             return {
@@ -1114,7 +1175,7 @@ class GridBot:
                 "fills": self.fill_count,
                 "balances": {"USD": str(usd_bal), self.base_currency: str(base_bal)},
                 "portfolio_value_usd": str(portfolio),
-                "inventory_cap_pct": str(self._active_inventory_cap_pct),
+                "inventory_cap_pct": str(self._effective_inventory_cap_pct()),
                 "trend_strength": str(self._cached_trend_strength),
                 "adx": str(self._cached_adx),
                 "market_regime": self._market_regime,
@@ -1126,6 +1187,7 @@ class GridBot:
                 "daily_pnl_per_1k": str(pnl_per_1k),
                 "daily_turnover_ratio": str(turnover_ratio),
                 "risk_metrics": risk,
+                "portfolio_beta": str(portfolio_beta),
                 "recent_events": list(self.recent_events),
                 "orders": self.orders,
                 "config": self._config_snapshot(),
@@ -1319,6 +1381,7 @@ class GridBot:
             inventory_ratio = self._btc_inventory_ratio(price if price > 0 else Decimal("0"))
             capital_used = max(Decimal("1"), portfolio)
             pnl_per_1k = (self._daily_realized_pnl / capital_used) * Decimal("1000")
+            portfolio_beta = self.shared_risk_state.get_portfolio_beta() if self.shared_risk_state is not None else Decimal("0")
 
             labels = f'product_id="{self.config.product_id}"'
             lines = [
@@ -1334,6 +1397,9 @@ class GridBot:
                 "# HELP bot_pnl_per_1k Daily realized PnL per $1k of capital in USD.",
                 "# TYPE bot_pnl_per_1k gauge",
                 f"bot_pnl_per_1k{{{labels}}} {float(pnl_per_1k)}",
+                "# HELP bot_portfolio_beta Portfolio beta versus BTC benchmark returns.",
+                "# TYPE bot_portfolio_beta gauge",
+                f"bot_portfolio_beta{{{labels}}} {float(portfolio_beta)}",
                 "# HELP api_latency_milliseconds Coinbase API call latency histogram in milliseconds.",
                 "# TYPE api_latency_milliseconds histogram",
             ]
@@ -1680,6 +1746,18 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("BASE_BUY_MODE must be off or auto")
     if not any(item.strip() for item in config.product_ids.replace(";", ",").split(",")):
         raise ValueError("PRODUCT_IDS must include at least one product id")
+    if not (Decimal("0") <= config.cross_asset_correlation_threshold <= Decimal("1")):
+        raise ValueError("CROSS_ASSET_CORRELATION_THRESHOLD must be in [0,1]")
+    if not (Decimal("0") < config.cross_asset_leader_inventory_trigger_pct <= Decimal("1.5")):
+        raise ValueError("CROSS_ASSET_LEADER_INVENTORY_TRIGGER_PCT must be in (0,1.5]")
+    if not (Decimal("0") < config.cross_asset_inventory_tightening_factor <= Decimal("1")):
+        raise ValueError("CROSS_ASSET_INVENTORY_TIGHTENING_FACTOR must be in (0,1]")
+    if not (Decimal("0") < config.cross_asset_inventory_min_pct <= Decimal("1")):
+        raise ValueError("CROSS_ASSET_INVENTORY_MIN_PCT must be in (0,1]")
+    if config.cross_asset_candle_lookback < 2:
+        raise ValueError("CROSS_ASSET_CANDLE_LOOKBACK must be >= 2")
+    if config.cross_asset_refresh_seconds < 5:
+        raise ValueError("CROSS_ASSET_REFRESH_SECONDS must be >= 5")
 
 
 def _orders_path() -> Path:
@@ -1855,6 +1933,45 @@ def _find_decimal(payload: Any, candidate_keys: List[str]) -> Optional[Decimal]:
     return None
 
 
+def _returns_from_closes(closes: List[Decimal]) -> List[Decimal]:
+    returns: List[Decimal] = []
+    for prev, cur in zip(closes, closes[1:]):
+        if prev > 0:
+            returns.append((cur - prev) / prev)
+    return returns
+
+
+def _pearson_corr(xs: List[Decimal], ys: List[Decimal]) -> Decimal:
+    n = min(len(xs), len(ys))
+    if n < 2:
+        return Decimal("0")
+    xs = xs[-n:]
+    ys = ys[-n:]
+    mean_x = sum(xs, Decimal("0")) / Decimal(n)
+    mean_y = sum(ys, Decimal("0")) / Decimal(n)
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / Decimal(n)
+    var_x = sum((x - mean_x) * (x - mean_x) for x in xs) / Decimal(n)
+    var_y = sum((y - mean_y) * (y - mean_y) for y in ys) / Decimal(n)
+    if var_x <= 0 or var_y <= 0:
+        return Decimal("0")
+    return cov / ((var_x.sqrt()) * (var_y.sqrt()))
+
+
+def _beta(asset_returns: List[Decimal], benchmark_returns: List[Decimal]) -> Decimal:
+    n = min(len(asset_returns), len(benchmark_returns))
+    if n < 2:
+        return Decimal("0")
+    x = benchmark_returns[-n:]
+    y = asset_returns[-n:]
+    mean_x = sum(x, Decimal("0")) / Decimal(n)
+    mean_y = sum(y, Decimal("0")) / Decimal(n)
+    cov = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y)) / Decimal(n)
+    var_x = sum((xi - mean_x) * (xi - mean_x) for xi in x) / Decimal(n)
+    if var_x <= 0:
+        return Decimal("0")
+    return cov / var_x
+
+
 def _as_dict(response: Any) -> Dict[str, Any]:
     if isinstance(response, dict):
         return response
@@ -1870,6 +1987,8 @@ class GridManager:
         self.client = client
         self.config = config
         self.engines: List[GridBot] = []
+        self._shared_risk_state = SharedRiskState()
+        self._risk_task: Optional[asyncio.Task[Any]] = None
 
     def _product_ids(self) -> List[str]:
         raw = self.config.product_ids or self.config.product_id
@@ -1897,6 +2016,106 @@ class GridManager:
             portfolio.apply_delta(base, self.config.paper_start_base)
         return portfolio
 
+    def _fetch_closes_for_product(self, product_id: str) -> List[Decimal]:
+        params = urllib.parse.urlencode(
+            {
+                "granularity": self.config.trend_candle_granularity,
+                "limit": str(max(2, self.config.cross_asset_candle_lookback)),
+            }
+        )
+        url = f"https://api.coinbase.com/api/v3/brokerage/products/{product_id}/candles?{params}"
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            logging.warning("Cross-asset candle fetch failed for %s: %s", product_id, exc)
+            return []
+
+        rows: List[Tuple[int, Decimal]] = []
+        for candle in payload.get("candles", []):
+            start = candle.get("start")
+            close = candle.get("close")
+            if start is None or close is None:
+                continue
+            rows.append((int(start), Decimal(str(close))))
+        rows.sort(key=lambda item: item[0])
+        return [close for _ts, close in rows]
+
+    def _refresh_cross_asset_risk(self) -> None:
+        if not self.config.cross_asset_correlation_enabled or len(self.engines) < 2:
+            for engine in self.engines:
+                self._shared_risk_state.set_inventory_cap(engine.config.product_id, engine.config.max_btc_inventory_pct)
+            self._shared_risk_state.set_portfolio_beta(Decimal("0"))
+            return
+
+        product_ids = [engine.config.product_id for engine in self.engines]
+        closes_by_product = {pid: self._fetch_closes_for_product(pid) for pid in product_ids}
+        returns_by_product = {pid: _returns_from_closes(closes) for pid, closes in closes_by_product.items()}
+
+        for engine in self.engines:
+            self._shared_risk_state.set_inventory_cap(engine.config.product_id, engine.config.max_btc_inventory_pct)
+
+        leader = None
+        leader_usage = Decimal("0")
+        for engine in self.engines:
+            price = engine.last_price
+            usage = engine._btc_inventory_ratio(price if price > 0 else Decimal("0"))
+            cap = max(Decimal("0.0001"), engine.config.max_btc_inventory_pct)
+            normalized = usage / cap
+            if normalized > leader_usage:
+                leader_usage = normalized
+                leader = engine
+
+        if leader is not None and leader_usage >= self.config.cross_asset_leader_inventory_trigger_pct:
+            leader_id = leader.config.product_id
+            leader_returns = returns_by_product.get(leader_id, [])
+            for engine in self.engines:
+                target_id = engine.config.product_id
+                if target_id == leader_id:
+                    continue
+                target_returns = returns_by_product.get(target_id, [])
+                corr = _pearson_corr(leader_returns, target_returns)
+                self._shared_risk_state.set_correlation(leader_id, target_id, corr)
+                if corr >= self.config.cross_asset_correlation_threshold:
+                    tightened = engine.config.max_btc_inventory_pct * self.config.cross_asset_inventory_tightening_factor
+                    tightened = max(self.config.cross_asset_inventory_min_pct, tightened)
+                    self._shared_risk_state.set_inventory_cap(target_id, tightened)
+                    logging.info(
+                        "Cross-asset cap tightened for %s: corr(%s,%s)=%.3f leader_usage=%.2f%% cap=%.2f%%",
+                        target_id,
+                        leader_id,
+                        target_id,
+                        float(corr),
+                        float(leader_usage * 100),
+                        float(tightened * 100),
+                    )
+
+        benchmark_returns = returns_by_product.get("BTC-USD")
+        if not benchmark_returns:
+            first = product_ids[0] if product_ids else ""
+            benchmark_returns = returns_by_product.get(first, [])
+
+        portfolio_value = Decimal("0")
+        weighted_beta = Decimal("0")
+        for engine in self.engines:
+            price = engine.last_price
+            usd_bal = engine._get_available_balance("USD")
+            base_bal = engine._get_available_balance(engine.base_currency)
+            value = usd_bal + (base_bal * price if price > 0 else Decimal("0"))
+            portfolio_value += value
+            asset_beta = _beta(returns_by_product.get(engine.config.product_id, []), benchmark_returns)
+            weighted_beta += value * asset_beta
+
+        if portfolio_value > 0:
+            self._shared_risk_state.set_portfolio_beta(weighted_beta / portfolio_value)
+        else:
+            self._shared_risk_state.set_portfolio_beta(Decimal("0"))
+
+    async def _cross_asset_risk_loop(self) -> None:
+        while any(engine._running for engine in self.engines):
+            await asyncio.to_thread(self._refresh_cross_asset_risk)
+            await asyncio.sleep(max(5, self.config.cross_asset_refresh_seconds))
+
     async def run(self) -> None:
         shared_portfolio = self._shared_paper_portfolio()
         for product_id in self._product_ids():
@@ -1909,6 +2128,7 @@ class GridManager:
                     config=engine_cfg,
                     orders_path=self._orders_path_for(product_id),
                     shared_paper_portfolio=shared_portfolio,
+                    shared_risk_state=self._shared_risk_state,
                 )
             )
 
@@ -1918,7 +2138,14 @@ class GridManager:
 
         names = ", ".join(e.config.product_id for e in self.engines)
         logging.info("GridManager starting %s engines: %s", len(self.engines), names)
-        await asyncio.gather(*(engine.run() for engine in self.engines))
+        self._risk_task = asyncio.create_task(self._cross_asset_risk_loop(), name="cross-asset-risk-loop")
+        try:
+            await asyncio.gather(*(engine.run() for engine in self.engines))
+        finally:
+            if self._risk_task is not None:
+                self._risk_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._risk_task
 
     def stop(self) -> None:
         for engine in self.engines:

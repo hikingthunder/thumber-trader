@@ -22,10 +22,11 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
 - Enhances paper trading with queue-delay, exceed-threshold, and slippage simulation.
 - Exposes daily normalized PnL, turnover, and VaR/CVaR risk metrics in dashboard status.
-- Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, and Coinbase API latency histogram.
+- Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, portfolio beta, and Coinbase API latency histogram.
 - Applies risk controls (USD reserve, BTC inventory cap, stop-loss awareness).
 - Adds trend bias (EMA fast/slow over Coinbase candles) to be more defensive in downtrends.
 - Detects market regime via ADX and auto-adjusts grid width + buy order notional for trending vs ranging conditions.
+- In multi-asset mode, tightens correlated products' inventory caps when one asset is already near its own inventory limit.
 
 ## 1) Debian 13 / Proxmox LXC setup
 
@@ -147,6 +148,15 @@ DYNAMIC_INVENTORY_CAP_ENABLED=false
 INVENTORY_CAP_MIN_PCT=0.30
 INVENTORY_CAP_MAX_PCT=0.80
 
+# Optional cross-asset correlation risk filter
+CROSS_ASSET_CORRELATION_ENABLED=true
+CROSS_ASSET_CORRELATION_THRESHOLD=0.85
+CROSS_ASSET_LEADER_INVENTORY_TRIGGER_PCT=0.80
+CROSS_ASSET_INVENTORY_TIGHTENING_FACTOR=0.65
+CROSS_ASSET_INVENTORY_MIN_PCT=0.20
+CROSS_ASSET_CANDLE_LOOKBACK=48
+CROSS_ASSET_REFRESH_SECONDS=300
+
 TREND_GRANULARITY=ONE_HOUR
 TREND_CANDLE_LIMIT=72
 TREND_EMA_FAST=9
@@ -238,6 +248,7 @@ Included metrics:
 - `bot_inventory_ratio` (gauge): base-asset notional / total portfolio value.
 - `bot_equity_curve_usd` (gauge): mark-to-market portfolio equity in USD.
 - `bot_pnl_per_1k` (gauge): daily realized PnL normalized per $1k capital.
+- `bot_portfolio_beta` (gauge): portfolio beta versus BTC benchmark returns.
 - `api_latency_milliseconds` (histogram): latency distribution for Coinbase REST/public calls.
 
 This makes it straightforward to build a Grafana dashboard that overlays strategy outputs (equity / PnL per $1k) with API health (latency).
