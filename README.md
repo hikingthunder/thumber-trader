@@ -16,6 +16,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Persists state in SQLite (`grid_state.db`) for restart recovery and reporting.
 - Runs the core engine on `asyncio` with concurrent market polling, risk monitoring, and user-stream handling.
 - Uses Coinbase `WSUserClient` for low-latency fill notifications and immediate replacement orders.
+- Tracks Coinbase WebSocket sequence numbers; on any gap, automatically triggers REST `get_orders` reconciliation so local SQLite state recovers before normal execution resumes.
 - Keeps periodic polling (60s default) as a resilience backstop and market-data refresh path.
 - Supports optional exchange-side attached bracket exits for BUY entries.
 - Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
