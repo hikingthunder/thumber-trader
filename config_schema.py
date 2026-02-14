@@ -70,4 +70,11 @@ CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"env": "CROSS_ASSET_INVENTORY_MIN_PCT", "attr": "cross_asset_inventory_min_pct", "type": "decimal"},
     {"env": "CROSS_ASSET_CANDLE_LOOKBACK", "attr": "cross_asset_candle_lookback", "type": "int"},
     {"env": "CROSS_ASSET_REFRESH_SECONDS", "attr": "cross_asset_refresh_seconds", "type": "int"},
+    {"env": "API_CIRCUIT_BREAKER_ENABLED", "attr": "api_circuit_breaker_enabled", "type": "bool"},
+    {"env": "API_LATENCY_P95_THRESHOLD_MS", "attr": "api_latency_p95_threshold_ms", "type": "float"},
+    {"env": "API_FAILURE_RATE_THRESHOLD_PCT", "attr": "api_failure_rate_threshold_pct", "type": "decimal"},
+    {"env": "API_HEALTH_WINDOW_SECONDS", "attr": "api_health_window_seconds", "type": "int"},
+    {"env": "API_RECOVERY_CONSECUTIVE_MINUTES", "attr": "api_recovery_consecutive_minutes", "type": "int"},
+    {"env": "TELEGRAM_BOT_TOKEN", "attr": "telegram_bot_token", "type": "str"},
+    {"env": "TELEGRAM_CHAT_ID", "attr": "telegram_chat_id", "type": "str"},
 ]

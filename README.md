@@ -22,7 +22,9 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
 - Enhances paper trading with queue-delay, exceed-threshold, and slippage simulation.
 - Exposes daily normalized PnL, turnover, and VaR/CVaR risk metrics in dashboard status.
-- Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, portfolio beta, and Coinbase API latency histogram.
+- Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, portfolio beta, Coinbase API latency histogram, and API safe-mode state.
+- Includes an API-health operational circuit breaker that enters Safe Mode (pauses new BUY/entry orders) when latency/failure thresholds are breached, then auto-resumes after sustained recovery.
+- Sends a high-priority Telegram alert when API instability forces Safe Mode (optional token/chat-id configuration).
 - Applies risk controls (USD reserve, BTC inventory cap, stop-loss awareness).
 - Adds trend bias (EMA fast/slow over Coinbase candles) to be more defensive in downtrends.
 - Detects market regime via ADX and auto-adjusts grid width + buy order notional for trending vs ranging conditions.
@@ -124,6 +126,17 @@ DASHBOARD_PORT=8080
 # Prometheus exporter endpoint (scrape with Prometheus; visualize in Grafana)
 PROMETHEUS_ENABLED=true
 PROMETHEUS_PATH=/metrics
+
+# API operational circuit breaker
+API_CIRCUIT_BREAKER_ENABLED=true
+API_LATENCY_P95_THRESHOLD_MS=2000
+API_FAILURE_RATE_THRESHOLD_PCT=0.05
+API_HEALTH_WINDOW_SECONDS=300
+API_RECOVERY_CONSECUTIVE_MINUTES=5
+
+# Optional Telegram alerting for API instability safe-mode events
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
 
 # Safer dry-run mode (simulated fills + balances)
 PAPER_TRADING_MODE=false
@@ -250,6 +263,7 @@ Included metrics:
 - `bot_pnl_per_1k` (gauge): daily realized PnL normalized per $1k capital.
 - `bot_portfolio_beta` (gauge): portfolio beta versus BTC benchmark returns.
 - `api_latency_milliseconds` (histogram): latency distribution for Coinbase REST/public calls.
+- `bot_api_safe_mode` (gauge): `1` when API circuit breaker Safe Mode is active and new entry (BUY) orders are paused.
 
 This makes it straightforward to build a Grafana dashboard that overlays strategy outputs (equity / PnL per $1k) with API health (latency).
 
