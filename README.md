@@ -20,6 +20,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Computes an alpha fusion confidence score per grid level by combining RSI, MACD histogram, and order book imbalance.
 - Detects order-flow toxicity with VPIN (volume-time buckets), then auto-widens grid bands or pauses entries when VPIN breaches its rolling 95th-percentile threshold.
 - Tracks Coinbase WebSocket sequence numbers; on any gap, automatically triggers REST `get_orders` reconciliation so local SQLite state recovers before normal execution resumes.
+- Supports optional Active-Passive HA failover via shared SQLite lock/heartbeat: a standby instance promotes itself if the active instance misses WebSocket sequence heartbeat updates for configurable polling cycles.
 - Keeps periodic polling (60s default) as a resilience backstop and market-data refresh path.
 - Supports optional exchange-side attached bracket exits for BUY entries.
 - Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
@@ -104,6 +105,13 @@ MIN_GRID_PROFIT_PCT=0.015
 MAKER_FEE_PCT=0.004
 TARGET_NET_PROFIT_PCT=0.002
 POLL_SECONDS=60
+
+# Active-passive HA failover (shared DB on clustered storage)
+HA_FAILOVER_ENABLED=false
+HA_INSTANCE_ID=proxmox-node-a
+HA_TAKEOVER_POLL_CYCLES=3
+HA_LOCK_LEASE_SECONDS=30
+HA_STANDBY_SLEEP_SECONDS=5
 
 # Multi-venue consensus pricing
 CONSENSUS_PRICING_ENABLED=true

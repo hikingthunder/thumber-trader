@@ -56,6 +56,11 @@ class BotConfig:
     maker_fee_pct: Decimal = Decimal(os.getenv("MAKER_FEE_PCT", "0.004"))
     target_net_profit_pct: Decimal = Decimal(os.getenv("TARGET_NET_PROFIT_PCT", "0.002"))
     poll_seconds: int = int(os.getenv("POLL_SECONDS", "60"))
+    ha_failover_enabled: bool = os.getenv("HA_FAILOVER_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    ha_instance_id: str = os.getenv("HA_INSTANCE_ID", f"{os.uname().nodename}-{os.getpid()}").strip()
+    ha_takeover_poll_cycles: int = int(os.getenv("HA_TAKEOVER_POLL_CYCLES", "3"))
+    ha_lock_lease_seconds: int = int(os.getenv("HA_LOCK_LEASE_SECONDS", "30"))
+    ha_standby_sleep_seconds: int = int(os.getenv("HA_STANDBY_SLEEP_SECONDS", "5"))
 
     # multi-venue market data
     consensus_pricing_enabled: bool = os.getenv("CONSENSUS_PRICING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -387,6 +392,9 @@ class GridStrategy(StrategyEngine):
         self._ws_client: Optional[Any] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._last_ws_sequence: Optional[int] = self._load_last_ws_sequence()
+        self._last_ws_sequence_ts = self._load_last_ws_sequence_ts() or 0.0
+        self._ha_lock_name = f"{self.config.product_id}:{Path(self.config.state_db_path).name}"
+        self._ha_role = "active" if not self.config.ha_failover_enabled else "standby"
         self._cached_trend_strength = Decimal("0")
         self._cached_atr_pct = Decimal("0")
         self._cached_adx = Decimal("0")
@@ -462,6 +470,7 @@ class GridStrategy(StrategyEngine):
 
     async def run(self) -> None:
         self._event_loop = asyncio.get_running_loop()
+        promoted_from_standby = await self._ha_wait_for_active_role()
         if self.config.dashboard_enabled:
             self._start_dashboard_server()
         self._load_product_metadata()
@@ -472,6 +481,9 @@ class GridStrategy(StrategyEngine):
             self._paper_inventory_cost_usd = self.config.paper_start_base * current_price
         self.grid_levels = self._build_grid_levels(current_price)
         self._run_safe_start_checks(current_price)
+
+        if promoted_from_standby:
+            await asyncio.to_thread(self._reconcile_state_from_exchange)
 
         if not self.orders:
             logging.info("No persisted orders found; placing initial adaptive grid.")
@@ -512,6 +524,10 @@ class GridStrategy(StrategyEngine):
                     self.last_price = current_price
                     self.last_trend_bias = trend_bias
                     self._notify_dashboard_update_locked()
+                if not await asyncio.to_thread(self._ha_refresh_active_lock):
+                    logging.error("Lost HA active lease; stopping strategy to avoid split-brain execution.")
+                    self._running = False
+                    break
                 if not self._paused:
                     await asyncio.to_thread(self._maybe_roll_grid, current_price)
                     await asyncio.to_thread(self._process_open_orders, current_price, trend_bias)
@@ -2712,6 +2728,16 @@ class GridStrategy(StrategyEngine):
                     value TEXT NOT NULL
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ha_lock (
+                    lock_name TEXT PRIMARY KEY,
+                    holder_id TEXT NOT NULL,
+                    lease_expires_ts REAL NOT NULL,
+                    holder_last_ws_sequence INTEGER,
+                    holder_ws_sequence_ts REAL NOT NULL,
+                    updated_ts REAL NOT NULL
+                )
+            """)
             self._db.commit()
 
     def _ensure_daily_stats_columns(self, cur: sqlite3.Cursor) -> None:
@@ -2738,12 +2764,127 @@ class GridStrategy(StrategyEngine):
             return None
 
     def _save_last_ws_sequence(self, sequence: int) -> None:
+        now = time.time()
+        self._last_ws_sequence_ts = now
         with self._db_lock:
             self._db.execute(
                 "INSERT OR REPLACE INTO state_meta(key, value) VALUES('last_ws_sequence', ?)",
                 (str(sequence),),
             )
+            self._db.execute(
+                "INSERT OR REPLACE INTO state_meta(key, value) VALUES('last_ws_sequence_ts', ?)",
+                (str(now),),
+            )
             self._db.commit()
+
+    def _load_last_ws_sequence_ts(self) -> Optional[float]:
+        with self._db_lock:
+            row = self._db.execute("SELECT value FROM state_meta WHERE key='last_ws_sequence_ts'").fetchone()
+        if row is None or row[0] is None:
+            return None
+        try:
+            return float(str(row[0]))
+        except (TypeError, ValueError):
+            return None
+
+    async def _ha_wait_for_active_role(self) -> bool:
+        if not self.config.ha_failover_enabled:
+            return False
+        promoted_from_standby = False
+        while self._running:
+            became_active, promotion = await asyncio.to_thread(self._ha_try_acquire_active_role)
+            if became_active:
+                self._ha_role = "active"
+                if promotion:
+                    promoted_from_standby = True
+                    logging.warning("HA failover promotion complete for %s (instance=%s).", self.config.product_id, self.config.ha_instance_id)
+                else:
+                    logging.info("HA active lock acquired for %s (instance=%s).", self.config.product_id, self.config.ha_instance_id)
+                return promoted_from_standby
+            self._ha_role = "standby"
+            await asyncio.sleep(max(1, self.config.ha_standby_sleep_seconds))
+        return promoted_from_standby
+
+    def _ha_try_acquire_active_role(self) -> Tuple[bool, bool]:
+        now = time.time()
+        lease_expires = now + max(5, self.config.ha_lock_lease_seconds)
+        stale_cutoff = now - (self.config.poll_seconds * max(1, self.config.ha_takeover_poll_cycles))
+        with self._db_lock:
+            row = self._db.execute(
+                "SELECT holder_id, lease_expires_ts, holder_ws_sequence_ts FROM ha_lock WHERE lock_name=?",
+                (self._ha_lock_name,),
+            ).fetchone()
+            if row is None:
+                self._db.execute(
+                    """
+                    INSERT INTO ha_lock(lock_name, holder_id, lease_expires_ts, holder_last_ws_sequence, holder_ws_sequence_ts, updated_ts)
+                    VALUES(?,?,?,?,?,?)
+                    """,
+                    (
+                        self._ha_lock_name,
+                        self.config.ha_instance_id,
+                        lease_expires,
+                        self._last_ws_sequence,
+                        self._last_ws_sequence_ts,
+                        now,
+                    ),
+                )
+                self._db.commit()
+                return True, False
+
+            holder_id = str(row[0])
+            holder_lease_expires = float(row[1] or 0)
+            holder_ws_sequence_ts = float(row[2] or 0)
+            promotion = holder_id != self.config.ha_instance_id
+
+            if holder_id == self.config.ha_instance_id:
+                self._db.execute(
+                    """
+                    UPDATE ha_lock
+                    SET lease_expires_ts=?, holder_last_ws_sequence=?, holder_ws_sequence_ts=?, updated_ts=?
+                    WHERE lock_name=? AND holder_id=?
+                    """,
+                    (
+                        lease_expires,
+                        self._last_ws_sequence,
+                        self._last_ws_sequence_ts,
+                        now,
+                        self._ha_lock_name,
+                        self.config.ha_instance_id,
+                    ),
+                )
+                self._db.commit()
+                return True, False
+
+            should_takeover = holder_lease_expires <= now or holder_ws_sequence_ts <= 0 or holder_ws_sequence_ts < stale_cutoff
+            if not should_takeover:
+                return False, False
+
+            updated = self._db.execute(
+                """
+                UPDATE ha_lock
+                SET holder_id=?, lease_expires_ts=?, holder_last_ws_sequence=?, holder_ws_sequence_ts=?, updated_ts=?
+                WHERE lock_name=? AND (lease_expires_ts<=? OR holder_ws_sequence_ts<=?)
+                """,
+                (
+                    self.config.ha_instance_id,
+                    lease_expires,
+                    self._last_ws_sequence,
+                    self._last_ws_sequence_ts,
+                    now,
+                    self._ha_lock_name,
+                    now,
+                    stale_cutoff,
+                ),
+            )
+            self._db.commit()
+            return updated.rowcount > 0, promotion and updated.rowcount > 0
+
+    def _ha_refresh_active_lock(self) -> bool:
+        if not self.config.ha_failover_enabled:
+            return True
+        acquired, _promotion = self._ha_try_acquire_active_role()
+        return acquired
 
     def _save_orders_to_db(self) -> None:
         with self._db_lock:
@@ -3079,6 +3220,12 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("GRID_LINES must be >= 2")
     if config.poll_seconds < 5:
         raise ValueError("POLL_SECONDS must be >= 5")
+    if config.ha_takeover_poll_cycles < 1:
+        raise ValueError("HA_TAKEOVER_POLL_CYCLES must be >= 1")
+    if config.ha_lock_lease_seconds < 5:
+        raise ValueError("HA_LOCK_LEASE_SECONDS must be >= 5")
+    if config.ha_standby_sleep_seconds < 1:
+        raise ValueError("HA_STANDBY_SLEEP_SECONDS must be >= 1")
     if config.fee_refresh_seconds < 60:
         raise ValueError("FEE_REFRESH_SECONDS must be >= 60")
     if config.grid_spacing_mode not in {"arithmetic", "geometric"}:
