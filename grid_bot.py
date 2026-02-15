@@ -262,7 +262,23 @@ class SharedRiskState:
             return self.portfolio_beta
 
 
-class GridBot:
+class StrategyEngine:
+    """Base interface for pluggable trading strategy engines."""
+
+    strategy_name = "base"
+
+    async def run(self) -> None:
+        raise NotImplementedError
+
+    def stop(self) -> None:
+        raise NotImplementedError
+
+
+class GridStrategy(StrategyEngine):
+    """Concrete grid strategy implementation for a single product."""
+
+    strategy_name = "grid"
+
     def __init__(
         self,
         client: Any,
@@ -2986,11 +3002,11 @@ def _as_dict(response: Any) -> Dict[str, Any]:
     raise TypeError(f"Unsupported response type: {type(response)!r}")
 
 
-class GridManager:
+class StrategyManager:
     def __init__(self, client: Any, config: BotConfig):
         self.client = client
         self.config = config
-        self.engines: List[GridBot] = []
+        self.engines: List[StrategyEngine] = []
         self._shared_risk_state = SharedRiskState()
         self._risk_task: Optional[asyncio.Task[Any]] = None
         self._telegram_thread: Optional[threading.Thread] = None
@@ -3120,7 +3136,7 @@ class GridManager:
         else:
             self._shared_risk_state.set_portfolio_beta(Decimal("0"))
 
-    def _compute_kelly_fraction(self, engine: GridBot) -> Optional[Decimal]:
+    def _compute_kelly_fraction(self, engine: StrategyEngine) -> Optional[Decimal]:
         with engine._db_lock:
             rows = engine._db.execute(
                 """
@@ -3235,7 +3251,7 @@ class GridManager:
             if shared_portfolio is not None:
                 engine_cfg = replace(engine_cfg, paper_start_usd=Decimal("0"), paper_start_base=Decimal("0"), paper_start_btc=Decimal("0"))
             self.engines.append(
-                GridBot(
+                GridStrategy(
                     client=self.client,
                     config=engine_cfg,
                     orders_path=self._orders_path_for(product_id),
@@ -3254,7 +3270,7 @@ class GridManager:
             return
 
         names = ", ".join(e.config.product_id for e in self.engines)
-        logging.info("GridManager starting %s engines: %s", len(self.engines), names)
+        logging.info("StrategyManager starting %s engines: %s", len(self.engines), names)
         self._risk_task = asyncio.create_task(self._cross_asset_risk_loop(), name="cross-asset-risk-loop")
         try:
             await asyncio.gather(*(engine.run() for engine in self.engines))
@@ -3270,7 +3286,7 @@ class GridManager:
         for engine in self.engines:
             engine.stop()
 
-    def _find_engine(self, product_id: str) -> Optional[GridBot]:
+    def _find_engine(self, product_id: str) -> Optional[StrategyEngine]:
         wanted = product_id.strip().upper()
         for engine in self.engines:
             if engine.config.product_id.upper() == wanted:
@@ -3406,6 +3422,11 @@ class GridManager:
         await update.effective_message.reply_text("\n\n".join(lines))
 
 
+
+# Backward-compatible aliases for existing integrations.
+GridBot = GridStrategy
+GridManager = StrategyManager
+
 def build_client() -> Any:
     api_key = _read_secret("COINBASE_API_KEY", "COINBASE_API_KEY_FILE")
     api_secret = _read_secret("COINBASE_API_SECRET", "COINBASE_API_SECRET_FILE")
@@ -3434,7 +3455,7 @@ def main() -> None:
         return
 
     client = build_client()
-    manager = GridManager(client, config)
+    manager = StrategyManager(client, config)
 
     def _handle_signal(signum: int, _frame: Any) -> None:
         logging.info("Received signal %s, shutting down cleanly.", signum)

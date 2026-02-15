@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Native historical backtester for the adaptive grid strategy.
 
-This script reuses GridBot execution logic in paper mode, but replaces live
+This script reuses GridStrategy execution logic in paper mode, but replaces live
 Coinbase REST calls with a mock client that walks through historical 1-minute
 OHLCV candles.
 """
@@ -18,7 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
-from grid_bot import BotConfig, GridBot, _validate_config
+from grid_bot import BotConfig, GridStrategy, _validate_config
 
 
 Candle = Tuple[int, Decimal, Decimal, Decimal, Decimal, Decimal]
@@ -57,8 +57,8 @@ class HistoricalRESTClient:
         }
 
 
-class BacktestGridBot(GridBot):
-    """GridBot variant that sources trend candles from in-memory history."""
+class BacktestGridStrategy(GridStrategy):
+    """GridStrategy variant that sources trend candles from in-memory history."""
 
     def __init__(self, *args: Any, historical_candles: Sequence[Candle], **kwargs: Any):
         super().__init__(*args, **kwargs)
@@ -69,7 +69,7 @@ class BacktestGridBot(GridBot):
         self._cursor = cursor
 
     def _fetch_public_candles(self) -> List[Tuple[int, Decimal, Decimal, Decimal]]:
-        # GridBot expects tuples: (timestamp, high, low, close)
+        # GridStrategy expects tuples: (timestamp, high, low, close)
         if not self._historical_candles:
             return []
         start_idx = max(0, self._cursor - self.config.trend_candle_limit + 1)
@@ -137,7 +137,7 @@ def run_backtest(config: BotConfig, candles: Sequence[Candle], start_index: int,
 
     with tempfile.TemporaryDirectory(prefix="thumber-backtest-") as tmp_dir:
         tmp = Path(tmp_dir)
-        bot = BacktestGridBot(
+        bot = BacktestGridStrategy(
             client=client,
             config=config,
             orders_path=tmp / "orders.json",
