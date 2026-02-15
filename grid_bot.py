@@ -108,6 +108,10 @@ class BotConfig:
     kelly_min_closed_trades: int = int(os.getenv("KELLY_MIN_CLOSED_TRADES", "20"))
     kelly_min_allocation_frac: Decimal = Decimal(os.getenv("KELLY_MIN_ALLOCATION_FRAC", "0.25"))
     kelly_max_allocation_frac: Decimal = Decimal(os.getenv("KELLY_MAX_ALLOCATION_FRAC", "2.50"))
+    black_litterman_tau: Decimal = Decimal(os.getenv("BLACK_LITTERMAN_TAU", "0.05"))
+    black_litterman_risk_aversion: Decimal = Decimal(os.getenv("BLACK_LITTERMAN_RISK_AVERSION", "2.5"))
+    black_litterman_confidence_floor: Decimal = Decimal(os.getenv("BLACK_LITTERMAN_CONFIDENCE_FLOOR", "0.05"))
+    black_litterman_view_return_abs: Decimal = Decimal(os.getenv("BLACK_LITTERMAN_VIEW_RETURN_ABS", "0.01"))
     quote_reserve_pct: Decimal = Decimal(os.getenv("QUOTE_RESERVE_PCT", "0.25"))
     max_btc_inventory_pct: Decimal = Decimal(os.getenv("MAX_BTC_INVENTORY_PCT", "0.65"))
     hard_stop_loss_pct: Decimal = Decimal(os.getenv("HARD_STOP_LOSS_PCT", "0.08"))
@@ -259,6 +263,8 @@ class SharedRiskState:
         self.portfolio_beta = Decimal("0")
         self.cointegration_targets: Dict[str, Decimal] = {}
         self.cointegration_signals: Dict[Tuple[str, str], Dict[str, str]] = {}
+        self.black_litterman_weights: Dict[str, Decimal] = {}
+        self.black_litterman_views: Dict[str, Decimal] = {}
 
     def set_inventory_cap(self, product_id: str, cap: Decimal) -> None:
         with self.lock:
@@ -303,6 +309,22 @@ class SharedRiskState:
     def get_cointegration_signals(self) -> Dict[Tuple[str, str], Dict[str, str]]:
         with self.lock:
             return {key: dict(value) for key, value in self.cointegration_signals.items()}
+
+    def set_black_litterman_weight(self, product_id: str, weight: Decimal) -> None:
+        with self.lock:
+            self.black_litterman_weights[product_id] = weight
+
+    def get_black_litterman_weight(self, product_id: str) -> Optional[Decimal]:
+        with self.lock:
+            return self.black_litterman_weights.get(product_id)
+
+    def set_black_litterman_view(self, product_id: str, value: Decimal) -> None:
+        with self.lock:
+            self.black_litterman_views[product_id] = value
+
+    def get_black_litterman_view(self, product_id: str) -> Optional[Decimal]:
+        with self.lock:
+            return self.black_litterman_views.get(product_id)
 
 
 class StrategyEngine:
@@ -368,7 +390,7 @@ class GridStrategy(StrategyEngine):
         self._market_regime_confidence = Decimal("0")
         self._active_inventory_cap_pct = self.config.max_btc_inventory_pct
         self._capital_allocation_multiplier = Decimal("1")
-        self._capital_allocation_kelly_fraction = Decimal("0")
+        self._capital_allocation_signal = Decimal("0")
         self.paper_balances = {
             "USD": self.config.paper_start_usd,
             self.base_currency: self.config.paper_start_base,
@@ -1214,10 +1236,10 @@ class GridStrategy(StrategyEngine):
             return self.config.adx_range_band_multiplier
         return Decimal("1")
 
-    def set_capital_allocation(self, multiplier: Decimal, kelly_fraction: Decimal) -> None:
+    def set_capital_allocation(self, multiplier: Decimal, signal: Decimal) -> None:
         with self._state_lock:
             self._capital_allocation_multiplier = max(Decimal("0"), multiplier)
-            self._capital_allocation_kelly_fraction = max(Decimal("0"), kelly_fraction)
+            self._capital_allocation_signal = signal
 
     def _allocated_base_order_notional(self) -> Decimal:
         sized = self.config.base_order_notional_usd * self._capital_allocation_multiplier
@@ -2009,6 +2031,8 @@ class GridStrategy(StrategyEngine):
             turnover_ratio = self._daily_turnover_usd / capital_used
             risk = self._risk_metrics()
             cointegration_signals = self.shared_risk_state.get_cointegration_signals() if self.shared_risk_state is not None else {}
+            bl_weight = self.shared_risk_state.get_black_litterman_weight(self.config.product_id) if self.shared_risk_state is not None else None
+            bl_view = self.shared_risk_state.get_black_litterman_view(self.config.product_id) if self.shared_risk_state is not None else None
             return {
                 "product_id": self.config.product_id,
                 "paper_trading_mode": self.config.paper_trading_mode,
@@ -2022,7 +2046,9 @@ class GridStrategy(StrategyEngine):
                 "portfolio_value_usd": str(portfolio),
                 "inventory_cap_pct": str(self._effective_inventory_cap_pct()),
                 "capital_allocation_multiplier": str(self._capital_allocation_multiplier),
-                "kelly_fraction": str(self._capital_allocation_kelly_fraction),
+                "capital_allocation_signal": str(self._capital_allocation_signal),
+                "black_litterman_weight": str(bl_weight if bl_weight is not None else Decimal("0")),
+                "black_litterman_view": str(bl_view if bl_view is not None else Decimal("0")),
                 "trend_strength": str(self._cached_trend_strength),
                 "adx": str(self._cached_adx),
                 "market_regime": self._market_regime,
@@ -2749,6 +2775,14 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("KELLY_MIN_CLOSED_TRADES must be >= 1")
     if not (Decimal("0") < config.kelly_min_allocation_frac <= config.kelly_max_allocation_frac):
         raise ValueError("KELLY_MIN_ALLOCATION_FRAC and KELLY_MAX_ALLOCATION_FRAC must satisfy 0 < min <= max")
+    if config.black_litterman_tau <= 0:
+        raise ValueError("BLACK_LITTERMAN_TAU must be > 0")
+    if config.black_litterman_risk_aversion <= 0:
+        raise ValueError("BLACK_LITTERMAN_RISK_AVERSION must be > 0")
+    if config.black_litterman_confidence_floor <= 0:
+        raise ValueError("BLACK_LITTERMAN_CONFIDENCE_FLOOR must be > 0")
+    if config.black_litterman_view_return_abs < 0:
+        raise ValueError("BLACK_LITTERMAN_VIEW_RETURN_ABS must be >= 0")
     if config.min_notional_usd <= 0:
         raise ValueError("MIN_NOTIONAL_USD must be > 0")
     if not (Decimal("0") <= config.quote_reserve_pct < Decimal("1")):
@@ -3462,113 +3496,97 @@ class StrategyManager:
                 str(half_life.quantize(Decimal('0.1')) if half_life < Decimal('999999') else half_life),
             )
 
-    def _compute_kelly_fraction(self, engine: StrategyEngine) -> Optional[Decimal]:
-        with engine._db_lock:
-            rows = engine._db.execute(
-                """
-                SELECT side, price, base_size, fee_paid
-                FROM fills
-                WHERE product_id = ?
-                ORDER BY ts DESC
-                LIMIT ?
-                """,
-                (engine.config.product_id, int(self.config.kelly_lookback_fills)),
-            ).fetchall()
-
-        if not rows:
-            return None
-
-        fills = list(reversed(rows))
-        open_buys: List[Tuple[Decimal, Decimal]] = []
-        closed_results: List[Decimal] = []
-
-        for side, price_raw, base_raw, fee_raw in fills:
-            side_u = str(side).upper()
-            price = Decimal(str(price_raw))
-            base_size = Decimal(str(base_raw))
-            fee_paid = Decimal(str(fee_raw))
-            if price <= 0 or base_size <= 0:
-                continue
-
-            notional = price * base_size
-            if side_u == "BUY":
-                open_buys.append((base_size, notional + fee_paid))
-                continue
-            if side_u != "SELL":
-                continue
-
-            sell_remaining = base_size
-            sell_proceeds = notional - fee_paid
-            matched_cost = Decimal("0")
-            matched_proceeds = Decimal("0")
-
-            while sell_remaining > 0 and open_buys:
-                buy_base, buy_cost = open_buys[0]
-                if buy_base <= 0:
-                    open_buys.pop(0)
-                    continue
-                matched = min(sell_remaining, buy_base)
-                ratio = matched / buy_base
-                cost_alloc = buy_cost * ratio
-                proceeds_alloc = sell_proceeds * (matched / base_size)
-                matched_cost += cost_alloc
-                matched_proceeds += proceeds_alloc
-                sell_remaining -= matched
-                leftover_base = buy_base - matched
-                leftover_cost = buy_cost - cost_alloc
-                if leftover_base > 0:
-                    open_buys[0] = (leftover_base, leftover_cost)
-                else:
-                    open_buys.pop(0)
-
-            if matched_cost > 0:
-                closed_results.append(matched_proceeds - matched_cost)
-
-        if len(closed_results) < self.config.kelly_min_closed_trades:
-            return None
-
-        wins = [x for x in closed_results if x > 0]
-        losses = [x for x in closed_results if x < 0]
-        if not wins or not losses:
-            return None
-
-        p = Decimal(len(wins)) / Decimal(len(closed_results))
-        avg_win = sum(wins, Decimal("0")) / Decimal(len(wins))
-        avg_loss = sum((-x for x in losses), Decimal("0")) / Decimal(len(losses))
-        if avg_loss <= 0:
-            return None
-
-        r = avg_win / avg_loss
-        if r <= 0:
-            return None
-
-        kelly = (p * (r + Decimal("1")) - Decimal("1")) / r
-        return max(Decimal("0"), kelly)
-
-    def _refresh_kelly_allocations(self) -> None:
+    def _refresh_black_litterman_allocations(self) -> None:
         if not self.config.kelly_allocation_enabled:
             for engine in self.engines:
                 engine.set_capital_allocation(Decimal("1"), Decimal("0"))
             return
 
+        if not self.engines:
+            return
+
+        tau = max(Decimal("0.0001"), self.config.black_litterman_tau)
+        delta = max(Decimal("0.0001"), self.config.black_litterman_risk_aversion)
+        conf_floor = max(Decimal("0.0001"), self.config.black_litterman_confidence_floor)
+        view_mag = max(Decimal("0"), self.config.black_litterman_view_return_abs)
+
+        values: Dict[str, Decimal] = {}
+        returns_by_product: Dict[str, List[Decimal]] = {}
+        total_value = Decimal("0")
         for engine in self.engines:
-            kelly_fraction = self._compute_kelly_fraction(engine)
-            if kelly_fraction is None:
-                engine.set_capital_allocation(Decimal("1"), Decimal("0"))
+            pid = engine.config.product_id
+            price = engine.last_price
+            usd_bal = engine._get_available_balance("USD")
+            base_bal = engine._get_available_balance(engine.base_currency)
+            value = usd_bal + (base_bal * price if price > 0 else Decimal("0"))
+            values[pid] = max(Decimal("0"), value)
+            total_value += max(Decimal("0"), value)
+            closes = self._fetch_closes_for_product(pid)
+            returns_by_product[pid] = _returns_from_closes(closes)
+
+        if total_value <= 0:
+            equal = Decimal("1") / Decimal(len(self.engines))
+            equilibrium = {engine.config.product_id: equal for engine in self.engines}
+        else:
+            equilibrium = {pid: (value / total_value) for pid, value in values.items()}
+
+        posterior_scores: Dict[str, Decimal] = {}
+        for engine in self.engines:
+            pid = engine.config.product_id
+            returns = returns_by_product.get(pid, [])
+            if len(returns) < 2:
+                posterior_scores[pid] = Decimal("0")
+                self._shared_risk_state.set_black_litterman_view(pid, Decimal("0"))
                 continue
 
-            multiplier = max(self.config.kelly_min_allocation_frac, min(kelly_fraction, self.config.kelly_max_allocation_frac))
-            engine.set_capital_allocation(multiplier, kelly_fraction)
+            mean_ret = sum(returns, Decimal("0")) / Decimal(len(returns))
+            var_ret = sum((r - mean_ret) * (r - mean_ret) for r in returns) / Decimal(len(returns))
+            sigma2 = max(Decimal("0.00000001"), var_ret)
+            prior_pi = delta * sigma2 * equilibrium.get(pid, Decimal("0"))
+
+            regime = getattr(engine, "_market_regime", "UNKNOWN")
+            confidence = max(Decimal("0"), getattr(engine, "_market_regime_confidence", Decimal("0")))
+            if regime == "TRENDING":
+                view = view_mag
+            elif regime == "RANGING":
+                view = -view_mag
+            else:
+                view = Decimal("0")
+            view = view * confidence
+            self._shared_risk_state.set_black_litterman_view(pid, view)
+
+            omega = max(Decimal("0.00000001"), tau * sigma2 / max(confidence, conf_floor))
+            prior_prec = Decimal("1") / max(Decimal("0.00000001"), tau * sigma2)
+            view_prec = Decimal("1") / omega
+            posterior = (prior_pi * prior_prec + view * view_prec) / (prior_prec + view_prec)
+            posterior_scores[pid] = posterior
+
+        positive = {pid: max(Decimal("0"), score) for pid, score in posterior_scores.items()}
+        score_sum = sum(positive.values(), Decimal("0"))
+        if score_sum <= 0:
+            weights = equilibrium
+        else:
+            weights = {pid: (score / score_sum) for pid, score in positive.items()}
+
+        n_assets = Decimal(len(self.engines))
+        for engine in self.engines:
+            pid = engine.config.product_id
+            weight = max(Decimal("0"), weights.get(pid, Decimal("0")))
+            self._shared_risk_state.set_black_litterman_weight(pid, weight)
+            signal = posterior_scores.get(pid, Decimal("0"))
+            multiplier = weight * n_assets
+            multiplier = max(self.config.kelly_min_allocation_frac, min(multiplier, self.config.kelly_max_allocation_frac))
+            engine.set_capital_allocation(multiplier, signal)
 
     async def _cross_asset_risk_loop(self) -> None:
-        kelly_next_refresh = 0.0
+        allocation_next_refresh = 0.0
         while any(engine._running for engine in self.engines):
             await asyncio.to_thread(self._refresh_cross_asset_risk)
             await asyncio.to_thread(self._refresh_cointegration_pairs)
             now = time.time()
-            if now >= kelly_next_refresh:
-                await asyncio.to_thread(self._refresh_kelly_allocations)
-                kelly_next_refresh = now + max(30, self.config.kelly_refresh_seconds)
+            if now >= allocation_next_refresh:
+                await asyncio.to_thread(self._refresh_black_litterman_allocations)
+                allocation_next_refresh = now + max(30, self.config.kelly_refresh_seconds)
             await asyncio.sleep(max(5, self.config.cross_asset_refresh_seconds))
 
     async def run(self) -> None:
