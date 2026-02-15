@@ -2970,8 +2970,9 @@ class GridStrategy(StrategyEngine):
                 allowed_roots.append(override_path)
         for root in allowed_roots:
             if resolved == root or root in resolved.parents:
+                if resolved.is_dir() or resolved.suffix in {".py", ".pyc", ".pyo"}:
+                    raise ValueError("env_path cannot be a directory or a Python file")
                 return resolved
-        raise ValueError("env_path must stay within the repository or configured BOT_ENV_PATH")
 
     def _start_dashboard_server(self) -> None:
         bot = self
