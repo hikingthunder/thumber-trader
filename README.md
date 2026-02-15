@@ -25,7 +25,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Supports optional exchange-side attached bracket exits for BUY entries.
 - Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
 - Enhances paper trading with queue-delay, exceed-threshold, and slippage simulation.
-- Exposes daily normalized PnL, turnover, VaR/CVaR, and rolling Calmar/Information ratios in dashboard status.
+- Exposes daily normalized PnL, turnover, VaR/CVaR, 30-day Survival Probability (vs 20% drawdown risk-of-ruin), and rolling Calmar/Information ratios in dashboard status.
 - Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, portfolio beta, Calmar/Information ratios, alpha attribution, Coinbase API latency histogram, and API safe-mode state.
 - Includes an API-health operational circuit breaker that enters Safe Mode (pauses new BUY/entry orders) when latency/failure thresholds are breached, then auto-resumes after sustained recovery.
 - Adds optional sentiment-driven Safe Mode overrides (e.g., X/Twitter or news API feed) that cancel pending BUY orders and tighten inventory caps toward USD during panic regimes.
@@ -398,6 +398,31 @@ python backtest.py \
 ```
 
 Output includes per-fold selected parameters, in-sample/out-of-sample metrics, plus summary robustness stats (fold win rate and aggregate out-of-sample PnL).
+
+
+### Monte Carlo stress testing
+
+`backtest.py` can now run Monte Carlo stress tests on top of native replay and WFO output:
+
+- **Permuted path simulation**: shuffles historical minute returns across each iteration.
+- **GBM simulation**: samples forward returns from a Gaussian process calibrated to historical mean/volatility.
+- **Survival Probability (SP)**: estimates the 30-day probability of avoiding a risk-of-ruin drawdown event (default: 20%) while factoring inventory skew.
+
+Example:
+
+```bash
+python backtest.py \
+  --csv data/btc_usd_1m.csv \
+  --product-id BTC-USD \
+  --lookback-minutes 43200 \
+  --monte-carlo-enabled \
+  --monte-carlo-method both \
+  --monte-carlo-iterations 1500 \
+  --survival-horizon-days 30 \
+  --risk-of-ruin-drawdown-pct 0.20
+```
+
+When enabled, output JSON includes a `survival_probability` block and a `monte_carlo.simulations[]` section with survival, risk-of-ruin, and end-equity quantiles per simulation method.
 
 ## Prometheus + Grafana observability
 

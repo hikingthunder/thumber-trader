@@ -2229,24 +2229,80 @@ class GridStrategy(StrategyEngine):
     def _risk_metrics(self) -> Dict[str, str]:
         candles = self._fetch_public_candles()
         closes = [c[3] for c in candles]
+        base_metrics = {
+            "var_95_24h_pct": "0",
+            "cvar_95_24h_pct": "0",
+            "survival_probability_30d": "1",
+            "risk_of_ruin_30d": "0",
+            "inventory_skew": "0",
+        }
         if len(closes) < 3:
-            return {"var_95_24h_pct": "0", "cvar_95_24h_pct": "0"}
+            return base_metrics
 
         returns: List[Decimal] = []
         for prev, cur in zip(closes, closes[1:]):
             if prev > 0:
                 returns.append((cur - prev) / prev)
         if not returns:
-            return {"var_95_24h_pct": "0", "cvar_95_24h_pct": "0"}
+            return base_metrics
 
         returns.sort()
         idx = max(0, int((len(returns) - 1) * 0.05))
         var = returns[idx]
         tail = returns[: idx + 1]
         cvar = sum(tail, Decimal("0")) / Decimal(len(tail))
+
+        survival = self._survival_probability(
+            returns=returns,
+            horizon_days=30,
+            ruin_drawdown_pct=Decimal("0.20"),
+            inventory_ratio=self._btc_inventory_ratio(self.last_price if self.last_price > 0 else closes[-1]),
+        )
         return {
             "var_95_24h_pct": str(var),
             "cvar_95_24h_pct": str(cvar),
+            "survival_probability_30d": str(survival["survival_probability"]),
+            "risk_of_ruin_30d": str(survival["risk_of_ruin_probability"]),
+            "inventory_skew": str(survival["inventory_skew"]),
+        }
+
+    def _survival_probability(
+        self,
+        *,
+        returns: List[Decimal],
+        horizon_days: int,
+        ruin_drawdown_pct: Decimal,
+        inventory_ratio: Decimal,
+    ) -> Dict[str, Decimal]:
+        if len(returns) < 2:
+            return {
+                "survival_probability": Decimal("1"),
+                "risk_of_ruin_probability": Decimal("0"),
+                "inventory_skew": abs(inventory_ratio - Decimal("0.5")) * Decimal("2"),
+            }
+
+        mean_return = sum(returns, Decimal("0")) / Decimal(len(returns))
+        variance = sum(((ret - mean_return) ** 2 for ret in returns), Decimal("0")) / Decimal(max(1, len(returns) - 1))
+        vol = variance.sqrt() if variance > 0 else Decimal("0")
+        horizon_steps = Decimal(max(1, horizon_days * 24 * 60))
+        sigma_h = vol * Decimal(str(math.sqrt(float(horizon_steps))))
+        drift_h = mean_return * horizon_steps
+
+        inventory_skew = abs(inventory_ratio - Decimal("0.5")) * Decimal("2")
+        downside_exposure = max(Decimal("0.0001"), inventory_ratio * (Decimal("1") + (inventory_skew * Decimal("0.5"))))
+        ruin_boundary = -ruin_drawdown_pct / downside_exposure
+
+        if sigma_h <= 0:
+            ruin_probability = Decimal("0") if ruin_boundary < drift_h else Decimal("1")
+        else:
+            z = float((ruin_boundary - drift_h) / sigma_h)
+            ruin_probability = Decimal(str(0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))))
+        ruin_probability = min(Decimal("1"), max(Decimal("0"), ruin_probability))
+        survival_probability = Decimal("1") - ruin_probability
+        return {
+            "survival_probability": survival_probability,
+            "risk_of_ruin_probability": ruin_probability,
+            "inventory_skew": inventory_skew,
         }
 
     def _strategy_performance_ratios(self, lookback: int = 90) -> Dict[str, Decimal]:
