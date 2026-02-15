@@ -348,6 +348,9 @@ class GridBot:
         self._last_consensus_components: Dict[str, str] = {}
         self._alpha_confidence_scores: Dict[int, Decimal] = {}
         self._alpha_signal_snapshot: Dict[str, str] = {"rsi": "0", "macd_hist": "0", "book_imbalance": "0"}
+        self._dashboard_candles: List[Dict[str, float]] = []
+        self._dashboard_candles_refresh_ts = 0.0
+        self._dashboard_recent_fills: List[Dict[str, str]] = self._load_recent_fills_for_dashboard(limit=40)
         self._migrate_orders_json_if_needed()
 
     async def run(self) -> None:
@@ -1388,6 +1391,58 @@ class GridBot:
         rows.sort(key=lambda x: x[0])
         return rows
 
+    def _fetch_public_candles_ohlc(self, granularity: str = "FIVE_MINUTE", limit: int = 120) -> List[Dict[str, float]]:
+        params = urllib.parse.urlencode({"granularity": granularity, "limit": str(limit)})
+        url = f"https://api.coinbase.com/api/v3/brokerage/products/{self.config.product_id}/candles?{params}"
+        try:
+            with self._coinbase_api_call("dashboard_candles", urllib.request.urlopen, url, timeout=15) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            logging.warning("Dashboard candle fetch failed: %s", exc)
+            return []
+
+        rows: List[Dict[str, float]] = []
+        for candle in payload.get("candles", []):
+            start = candle.get("start")
+            open_price = candle.get("open")
+            high = candle.get("high")
+            low = candle.get("low")
+            close = candle.get("close")
+            if start is None or open_price is None or high is None or low is None or close is None:
+                continue
+            rows.append(
+                {
+                    "time": int(start),
+                    "open": float(open_price),
+                    "high": float(high),
+                    "low": float(low),
+                    "close": float(close),
+                }
+            )
+        rows.sort(key=lambda row: row["time"])
+        return rows
+
+    def _dashboard_chart_snapshot(self) -> Dict[str, Any]:
+        candles: List[Dict[str, float]]
+        now = time.time()
+        with self._state_lock:
+            stale = (now - self._dashboard_candles_refresh_ts) > 15
+            candles = list(self._dashboard_candles)
+            recent_fills = list(self._dashboard_recent_fills)
+
+        if stale or not candles:
+            refreshed = self._fetch_public_candles_ohlc()
+            if refreshed:
+                candles = refreshed
+                with self._state_lock:
+                    self._dashboard_candles = list(refreshed)
+                    self._dashboard_candles_refresh_ts = now
+
+        return {
+            "candles": candles,
+            "recent_fills": recent_fills,
+        }
+
     def _compute_dynamic_inventory_cap(self, trend_strength: Decimal) -> Decimal:
         if not self.config.dynamic_inventory_cap_enabled:
             return self.config.max_btc_inventory_pct
@@ -1497,6 +1552,7 @@ class GridBot:
         self._dashboard_update_cond.notify_all()
 
     def _dashboard_stream_snapshot(self) -> Dict[str, Any]:
+        chart = self._dashboard_chart_snapshot()
         with self._state_lock:
             return {
                 "product_id": self.config.product_id,
@@ -1507,6 +1563,7 @@ class GridBot:
                 "fills": self.fill_count,
                 "orders": self.orders,
                 "recent_events": list(self.recent_events),
+                "chart": chart,
             }
 
     def _roll_daily_metrics_window(self) -> None:
@@ -1771,6 +1828,7 @@ class GridBot:
         }
 
     def _status_snapshot(self) -> Dict[str, Any]:
+        chart = self._dashboard_chart_snapshot()
         with self._state_lock:
             price = self.last_price
             usd_bal = self._get_available_balance("USD")
@@ -1821,6 +1879,7 @@ class GridBot:
                 "portfolio_beta": str(portfolio_beta),
                 "recent_events": list(self.recent_events),
                 "orders": self.orders,
+                "chart": chart,
                 "config": self._config_snapshot(),
             }
 
@@ -1864,6 +1923,21 @@ class GridBot:
         with self._db_lock:
             cur = self._db.cursor()
             return cur.execute(query, params).fetchall()
+
+    def _load_recent_fills_for_dashboard(self, limit: int = 40) -> List[Dict[str, str]]:
+        rows = self._fetch_fills()
+        fills: List[Dict[str, str]] = []
+        for row in rows[-limit:]:
+            fills.append(
+                {
+                    "ts": str(row[0]),
+                    "side": str(row[2]),
+                    "price": str(row[3]),
+                    "base_size": str(row[4]),
+                    "order_id": str(row[6]),
+                }
+            )
+        return fills
 
     def _config_snapshot(self) -> Dict[str, str]:
         snapshot: Dict[str, str] = {}
@@ -2338,6 +2412,7 @@ class GridBot:
         return orders
 
     def _record_fill(self, order_id: str, record: Dict[str, Any], fill_price: Decimal) -> None:
+        fill_ts = time.time()
         fee_paid = fill_price * Decimal(str(record.get("base_size", "0"))) * self._effective_maker_fee_pct
         with self._db_lock:
             self._db.execute(
@@ -2346,7 +2421,7 @@ class GridBot:
                 VALUES(?,?,?,?,?,?,?,?)
                 """,
                 (
-                    time.time(),
+                    fill_ts,
                     self.config.product_id,
                     str(record.get("side", "")),
                     str(fill_price),
@@ -2357,6 +2432,18 @@ class GridBot:
                 ),
             )
             self._db.commit()
+
+        with self._state_lock:
+            self._dashboard_recent_fills.append(
+                {
+                    "ts": str(fill_ts),
+                    "side": str(record.get("side", "")),
+                    "price": str(fill_price),
+                    "base_size": str(record.get("base_size", "0")),
+                    "order_id": order_id,
+                }
+            )
+            self._dashboard_recent_fills = self._dashboard_recent_fills[-40:]
 
     def _record_daily_stats_snapshot(self, current_price: Decimal) -> None:
         usd_bal = self._get_available_balance("USD")

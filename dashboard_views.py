@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 from typing import Any, Dict
 
 
@@ -32,6 +33,7 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
     button, .btn {{ border:0; border-radius:8px; padding:10px 12px; cursor:pointer; margin-right:8px; text-decoration:none; display:inline-block; }}
     .primary {{ background:#4f8cff; color:white; }} .danger {{ background:#d95f5f; color:white; }}
     .muted {{ color:#93a0bf; }} #action-status {{ margin-top:8px; }}
+    #price-chart {{ height: 440px; width: 100%; }}
   </style>
 </head>
 <body>
@@ -49,6 +51,12 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
     </div>
 
     <div class="card">
+      <h2>Grid Price Action</h2>
+      <p class="muted">Candles stream live with order layers and fill markers.</p>
+      <div id="price-chart"></div>
+    </div>
+
+    <div class="card">
       <button class="danger" onclick="sendAction('kill_switch')">Emergency Kill Switch</button>
       <button class="primary" onclick="sendAction('reanchor')">Manual Re-anchor</button>
       <button class="primary" onclick="openConfigWindow()">Open Configuration</button>
@@ -60,7 +68,14 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
     <div class="card"><h2>Recent Events</h2><ul id="recent-events">{events}</ul><p><a style="color:#4f8cff" href="/api/status">JSON API</a> · <a style="color:#4f8cff" href="/api/tax_report.csv">Tax CSV</a></p></div>
   </div>
 
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
   <script>
+    const initialSnapshot = {json.dumps(snapshot)};
+    let chart;
+    let candleSeries;
+    let buyOrderSeries = [];
+    let sellOrderSeries = [];
+
     function escapeHtml(value) {{
       return String(value ?? '')
         .replaceAll('&', '&amp;')
@@ -68,6 +83,100 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+    }}
+    function asNumber(value) {{
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }}
+    function buildOrderLayers(orders) {{
+      const grouped = {{ BUY: [], SELL: [] }};
+      Object.values(orders || {{}}).forEach((order) => {{
+        const side = String(order?.side || '').toUpperCase();
+        const price = asNumber(order?.price);
+        if (!price || !(side in grouped)) return;
+        grouped[side].push(price);
+      }});
+      grouped.BUY.sort((a, b) => a - b);
+      grouped.SELL.sort((a, b) => a - b);
+      return grouped;
+    }}
+    function renderOrderLayers(snapshot) {{
+      for (const series of buyOrderSeries) chart.removeSeries(series);
+      for (const series of sellOrderSeries) chart.removeSeries(series);
+      buyOrderSeries = [];
+      sellOrderSeries = [];
+
+      const layers = buildOrderLayers(snapshot.orders || {{}});
+      const candles = snapshot.chart?.candles || [];
+      if (!candles.length) return;
+      const firstTime = candles[0].time;
+      const lastTime = candles[candles.length - 1].time;
+
+      for (const price of layers.BUY) {{
+        const line = chart.addLineSeries({{ color: 'rgba(65, 216, 135, 0.7)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }});
+        line.setData([{{ time: firstTime, value: price }}, {{ time: lastTime, value: price }}]);
+        buyOrderSeries.push(line);
+      }}
+      for (const price of layers.SELL) {{
+        const line = chart.addLineSeries({{ color: 'rgba(255, 103, 103, 0.7)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }});
+        line.setData([{{ time: firstTime, value: price }}, {{ time: lastTime, value: price }}]);
+        sellOrderSeries.push(line);
+      }}
+    }}
+    function renderFillMarkers(snapshot) {{
+      const fills = (snapshot.chart?.recent_fills || []).map((fill) => {{
+        const ts = asNumber(fill?.ts);
+        const price = asNumber(fill?.price);
+        const side = String(fill?.side || '').toUpperCase();
+        if (!ts || !price || !side) return null;
+        const isBuy = side === 'BUY';
+        return {{
+          time: Math.floor(ts),
+          position: isBuy ? 'belowBar' : 'aboveBar',
+          color: isBuy ? '#38d489' : '#ff6b6b',
+          shape: isBuy ? 'arrowUp' : 'arrowDown',
+          text: `${{side}} @ $${{price.toFixed(2)}}`,
+        }};
+      }}).filter(Boolean);
+      candleSeries.setMarkers(fills);
+    }}
+    function renderChart(snapshot) {{
+      if (!chart || !candleSeries) return;
+      const candles = snapshot.chart?.candles || [];
+      if (candles.length) {{
+        candleSeries.setData(candles.map((c) => ({{
+          time: Number(c.time),
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close),
+        }})));
+      }}
+      renderOrderLayers(snapshot);
+      renderFillMarkers(snapshot);
+      chart.timeScale().fitContent();
+    }}
+    function initChart() {{
+      const chartContainer = document.getElementById('price-chart');
+      chart = LightweightCharts.createChart(chartContainer, {{
+        layout: {{ background: {{ color: '#121a2b' }}, textColor: '#d6e3ff' }},
+        grid: {{ vertLines: {{ color: '#24314e' }}, horzLines: {{ color: '#24314e' }} }},
+        rightPriceScale: {{ borderColor: '#2d3a58' }},
+        timeScale: {{ borderColor: '#2d3a58', timeVisible: true }},
+        crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+      }});
+      candleSeries = chart.addCandlestickSeries({{
+        upColor: '#38d489',
+        downColor: '#ff6b6b',
+        borderVisible: false,
+        wickUpColor: '#38d489',
+        wickDownColor: '#ff6b6b',
+      }});
+
+      const observer = new ResizeObserver(() => {{
+        chart.applyOptions({{ width: chartContainer.clientWidth, height: chartContainer.clientHeight }});
+      }});
+      observer.observe(chartContainer);
     }}
     function applySnapshot(snapshot) {{
       const setText = (id, value) => {{
@@ -94,6 +203,8 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
         const events = (snapshot.recent_events || []).map((event) => `<li>${{escapeHtml(event)}}</li>`);
         recentEvents.innerHTML = events.join('');
       }}
+
+      renderChart(snapshot);
     }}
     function connectEventStream() {{
       const source = new EventSource('/api/stream');
@@ -125,6 +236,8 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
       if (!popup) window.location.href = '/config';
     }}
 
+    initChart();
+    applySnapshot(initialSnapshot);
     connectEventStream();
   </script>
 </body>
