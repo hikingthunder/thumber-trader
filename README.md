@@ -24,8 +24,8 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Supports optional exchange-side attached bracket exits for BUY entries.
 - Refreshes maker fee data hourly (configurable) and auto-updates spacing economics.
 - Enhances paper trading with queue-delay, exceed-threshold, and slippage simulation.
-- Exposes daily normalized PnL, turnover, and VaR/CVaR risk metrics in dashboard status.
-- Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, portfolio beta, Coinbase API latency histogram, and API safe-mode state.
+- Exposes daily normalized PnL, turnover, VaR/CVaR, and rolling Calmar/Information ratios in dashboard status.
+- Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, portfolio beta, Calmar/Information ratios, alpha attribution, Coinbase API latency histogram, and API safe-mode state.
 - Includes an API-health operational circuit breaker that enters Safe Mode (pauses new BUY/entry orders) when latency/failure thresholds are breached, then auto-resumes after sustained recovery.
 - Adds optional sentiment-driven Safe Mode overrides (e.g., X/Twitter or news API feed) that cancel pending BUY orders and tighten inventory caps toward USD during panic regimes.
 - Sends a high-priority Telegram alert when API instability forces Safe Mode (optional token/chat-id configuration).
@@ -389,6 +389,10 @@ Included metrics:
 - `bot_equity_curve_usd` (gauge): mark-to-market portfolio equity in USD.
 - `bot_pnl_per_1k` (gauge): daily realized PnL normalized per $1k capital.
 - `bot_portfolio_beta` (gauge): portfolio beta versus BTC benchmark returns.
+- `bot_calmar_ratio` (gauge): rolling Calmar ratio from daily strategy returns.
+- `bot_information_ratio` (gauge): rolling Information Ratio of active returns vs market benchmark.
+- `bot_alpha_attribution_pnl_usd` (gauge, by `component`): realized PnL attribution for RSI, MACD, and book-imbalance alpha components.
+- `bot_alpha_weight` (gauge, by `component`): live alpha-fusion weights after attribution-based rebalancing.
 - `api_latency_milliseconds` (histogram): latency distribution for Coinbase REST/public calls.
 - `bot_api_safe_mode` (gauge): `1` when API circuit breaker Safe Mode is active and new entry (BUY) orders are paused.
 - `bot_sentiment_safe_mode` (gauge): `1` when sentiment panic Safe Mode is active.
