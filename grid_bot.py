@@ -191,6 +191,17 @@ class BotConfig:
     api_health_window_seconds: int = int(os.getenv("API_HEALTH_WINDOW_SECONDS", "300"))
     api_recovery_consecutive_minutes: int = int(os.getenv("API_RECOVERY_CONSECUTIVE_MINUTES", "5"))
 
+    # optional sentiment override module
+    sentiment_override_enabled: bool = os.getenv("SENTIMENT_OVERRIDE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    sentiment_source_url: str = os.getenv("SENTIMENT_SOURCE_URL", "")
+    sentiment_api_bearer_token: str = os.getenv("SENTIMENT_API_BEARER_TOKEN", "")
+    sentiment_json_path: str = os.getenv("SENTIMENT_JSON_PATH", "score")
+    sentiment_asset_query_param: str = os.getenv("SENTIMENT_ASSET_QUERY_PARAM", "symbol")
+    sentiment_refresh_seconds: int = int(os.getenv("SENTIMENT_REFRESH_SECONDS", "300"))
+    sentiment_lookback_seconds: int = int(os.getenv("SENTIMENT_LOOKBACK_SECONDS", "3600"))
+    sentiment_negative_threshold: Decimal = Decimal(os.getenv("SENTIMENT_NEGATIVE_THRESHOLD", "-0.6"))
+    sentiment_safe_inventory_cap_pct: Decimal = Decimal(os.getenv("SENTIMENT_SAFE_INVENTORY_CAP_PCT", "0.20"))
+
     # optional Telegram notifications
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -308,6 +319,15 @@ class GridBot:
         self._api_latency_observation_sum_ms = 0.0
         self._api_health_samples: collections.deque[Tuple[float, float, bool]] = collections.deque()
         self._api_safe_mode = False
+        self._sentiment_samples: collections.deque[Tuple[float, Decimal]] = collections.deque()
+        self._sentiment_safe_mode = False
+        self._sentiment_inventory_cap_pct_override: Optional[Decimal] = None
+        self._last_sentiment_report = {
+            "sample_count": 0,
+            "latest_score": "0",
+            "score_1h": "0",
+            "healthy": True,
+        }
         self._paused = False
         self._api_recovery_healthy_minutes = 0
         self._last_api_health_report = {
@@ -348,6 +368,8 @@ class GridBot:
             asyncio.create_task(self._ws_user_listener_loop(), name="ws-user-listener"),
             asyncio.create_task(self._api_health_monitor_loop(), name="api-health-monitor"),
         ]
+        if self.config.sentiment_override_enabled:
+            tasks.append(asyncio.create_task(self._sentiment_monitor_loop(), name="sentiment-monitor"))
         try:
             await asyncio.gather(*tasks)
         finally:
@@ -431,6 +453,14 @@ class GridBot:
                 logging.warning("WebSocket listener error: %s", exc)
                 self._close_ws_client()
                 await asyncio.sleep(2)
+
+    async def _sentiment_monitor_loop(self) -> None:
+        while self._running:
+            try:
+                await asyncio.to_thread(self._evaluate_sentiment_override)
+            except Exception as exc:
+                logging.exception("Sentiment monitor loop error: %s", exc)
+            await asyncio.sleep(max(30, self.config.sentiment_refresh_seconds))
 
     def _load_product_metadata(self) -> None:
         product = _as_dict(self._coinbase_api_call("get_product", self.client.get_product, product_id=self.config.product_id))
@@ -868,8 +898,8 @@ class GridBot:
 
         price = self._q_price(price)
         if side == "BUY":
-            if self._api_safe_mode:
-                logging.warning("Skipped BUY at %s because API safe mode is active.", price)
+            if self._buy_safe_mode_active():
+                logging.warning("Skipped BUY at %s because safe mode is active.", price)
                 return None
             if usd_notional is None:
                 raise ValueError("usd_notional is required for BUY")
@@ -964,11 +994,16 @@ class GridBot:
 
     def _effective_inventory_cap_pct(self) -> Decimal:
         cap = self._active_inventory_cap_pct
+        if self._sentiment_inventory_cap_pct_override is not None:
+            cap = min(cap, self._sentiment_inventory_cap_pct_override)
         if self.shared_risk_state is not None:
             shared_cap = self.shared_risk_state.get_inventory_cap(self.config.product_id)
             if shared_cap is not None:
                 cap = min(cap, shared_cap)
         return cap
+
+    def _buy_safe_mode_active(self) -> bool:
+        return self._api_safe_mode or self._sentiment_safe_mode
 
     def _get_trend_bias(self) -> str:
         candles = self._fetch_public_candles()
@@ -1509,6 +1544,115 @@ class GridBot:
                     logging.warning("Failed to cancel order %s: %s", order_id, exc)
         self.orders.clear()
 
+    def _cancel_pending_buy_orders(self) -> int:
+        buy_order_ids = [oid for oid, rec in self.orders.items() if str(rec.get("side", "")).upper() == "BUY"]
+        if not buy_order_ids:
+            return 0
+        if self.config.paper_trading_mode:
+            for oid in buy_order_ids:
+                self.orders.pop(oid, None)
+            return len(buy_order_ids)
+        try:
+            self.client.cancel_orders(order_ids=buy_order_ids)
+        except Exception:
+            logging.warning("Batch BUY cancel unavailable, falling back to single-order cancellation.")
+            for oid in buy_order_ids:
+                try:
+                    self.client.cancel_orders(order_ids=[oid])
+                except Exception as exc:
+                    logging.warning("Failed to cancel BUY order %s: %s", oid, exc)
+        for oid in buy_order_ids:
+            self.orders.pop(oid, None)
+        return len(buy_order_ids)
+
+    def _fetch_sentiment_score(self) -> Optional[Decimal]:
+        url = self.config.sentiment_source_url.strip()
+        if not url:
+            return None
+
+        query_key = self.config.sentiment_asset_query_param.strip()
+        if query_key:
+            split = urllib.parse.urlsplit(url)
+            query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
+            query[query_key] = [self.base_currency]
+            url = urllib.parse.urlunsplit(
+                (
+                    split.scheme,
+                    split.netloc,
+                    split.path,
+                    urllib.parse.urlencode(query, doseq=True),
+                    split.fragment,
+                )
+            )
+
+        headers = {"Accept": "application/json"}
+        token = self.config.sentiment_api_bearer_token.strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+
+        path = [p for p in self.config.sentiment_json_path.split(".") if p]
+        node: Any = payload
+        for key in path:
+            if isinstance(node, dict):
+                node = node.get(key)
+            else:
+                node = None
+            if node is None:
+                break
+        if node is None:
+            return None
+        return Decimal(str(node))
+
+    def _trim_sentiment_samples_locked(self, now: Optional[float] = None) -> None:
+        now = now if now is not None else time.time()
+        window_start = now - self.config.sentiment_lookback_seconds
+        while self._sentiment_samples and self._sentiment_samples[0][0] < window_start:
+            self._sentiment_samples.popleft()
+
+    def _evaluate_sentiment_override(self) -> None:
+        score = self._fetch_sentiment_score()
+        if score is None:
+            return
+        now = time.time()
+        with self._state_lock:
+            self._sentiment_samples.append((now, score))
+            self._trim_sentiment_samples_locked(now)
+            sample_count = len(self._sentiment_samples)
+            score_1h = sum((s for _, s in self._sentiment_samples), Decimal("0")) / Decimal(sample_count)
+            healthy = score_1h > self.config.sentiment_negative_threshold
+            self._last_sentiment_report = {
+                "sample_count": sample_count,
+                "latest_score": str(score),
+                "score_1h": str(score_1h),
+                "healthy": healthy,
+            }
+
+            if not healthy:
+                if not self._sentiment_safe_mode:
+                    self._sentiment_safe_mode = True
+                    self._sentiment_inventory_cap_pct_override = min(
+                        max(self.config.sentiment_safe_inventory_cap_pct, Decimal("0")),
+                        Decimal("1"),
+                    )
+                    canceled = self._cancel_pending_buy_orders()
+                    self._add_event(
+                        f"Sentiment panic detected (1h={score_1h}): safe mode ON, canceled {canceled} BUY orders"
+                    )
+                    logging.warning(
+                        "Sentiment score dropped to %s (threshold=%s). Entering safe mode and biasing inventory toward USD.",
+                        score_1h,
+                        self.config.sentiment_negative_threshold,
+                    )
+                    self._send_telegram_alert("⚠️ Sentiment Panic Detected: Entering Safe Mode and canceling BUY orders")
+            elif self._sentiment_safe_mode:
+                self._sentiment_safe_mode = False
+                self._sentiment_inventory_cap_pct_override = None
+                self._add_event(f"Sentiment recovered (1h={score_1h}): safe mode OFF")
+                logging.info("Sentiment recovered above threshold (%s > %s).", score_1h, self.config.sentiment_negative_threshold)
+
     def _cancel_single_order(self, order_id: str) -> None:
         if self.config.paper_trading_mode:
             self.orders.pop(order_id, None)
@@ -1649,8 +1793,10 @@ class GridBot:
                 "daily_pnl_per_1k": str(pnl_per_1k),
                 "daily_turnover_ratio": str(turnover_ratio),
                 "api_safe_mode": self._api_safe_mode,
+                "sentiment_safe_mode": self._sentiment_safe_mode,
                 "paused": self._paused,
                 "api_health": dict(self._last_api_health_report),
+                "sentiment_health": dict(self._last_sentiment_report),
                 "risk_metrics": risk,
                 "portfolio_beta": str(portfolio_beta),
                 "recent_events": list(self.recent_events),
@@ -1972,6 +2118,12 @@ class GridBot:
                 "# HELP bot_api_safe_mode Whether API circuit breaker safe mode is active (1=active).",
                 "# TYPE bot_api_safe_mode gauge",
                 f"bot_api_safe_mode{{{labels}}} {1 if self._api_safe_mode else 0}",
+                "# HELP bot_sentiment_safe_mode Whether sentiment safe mode is active (1=active).",
+                "# TYPE bot_sentiment_safe_mode gauge",
+                f"bot_sentiment_safe_mode{{{labels}}} {1 if self._sentiment_safe_mode else 0}",
+                "# HELP bot_sentiment_score_1h One-hour rolling sentiment score.",
+                "# TYPE bot_sentiment_score_1h gauge",
+                f"bot_sentiment_score_1h{{{labels}}} {self._last_sentiment_report.get('score_1h', '0')}",
             ]
 
             cumulative = 0
