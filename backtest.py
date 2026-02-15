@@ -12,6 +12,8 @@ import argparse
 import csv
 import json
 import logging
+import math
+import random
 import tempfile
 from dataclasses import replace
 from decimal import Decimal
@@ -132,6 +134,140 @@ def _format_decimal(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.00000001")), "f")
 
 
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _returns_from_candles(candles: Sequence[Candle], start_index: int, end_index: int) -> List[Decimal]:
+    closes = [candles[idx][4] for idx in range(start_index, end_index + 1)]
+    returns: List[Decimal] = []
+    for prev, cur in zip(closes, closes[1:]):
+        if prev > 0:
+            returns.append((cur - prev) / prev)
+    return returns
+
+
+def _simulate_drawdown_path(path_returns: Sequence[Decimal], ruin_drawdown_pct: Decimal) -> Tuple[Decimal, bool]:
+    equity = Decimal("1")
+    peak = Decimal("1")
+    max_drawdown = Decimal("0")
+    ruined = False
+    for ret in path_returns:
+        equity *= Decimal("1") + ret
+        if equity > peak:
+            peak = equity
+        if peak > 0:
+            drawdown = (peak - equity) / peak
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+            if drawdown >= ruin_drawdown_pct:
+                ruined = True
+    return equity, ruined
+
+
+def _monte_carlo_simulation(
+    *,
+    returns: Sequence[Decimal],
+    method: str,
+    iterations: int,
+    horizon_days: int,
+    ruin_drawdown_pct: Decimal,
+) -> Dict[str, Any]:
+    if iterations <= 0:
+        raise ValueError("Monte Carlo iterations must be > 0")
+    if horizon_days <= 0:
+        raise ValueError("Monte Carlo horizon must be > 0 days")
+    if not returns:
+        raise ValueError("Monte Carlo simulation requires at least one return")
+
+    horizon_steps = horizon_days * 24 * 60
+    sampled_end_equity: List[Decimal] = []
+    ruin_hits = 0
+
+    mean_return = sum(returns, Decimal("0")) / Decimal(len(returns))
+    variance = sum(((ret - mean_return) ** 2 for ret in returns), Decimal("0")) / Decimal(max(1, len(returns) - 1))
+    vol = variance.sqrt() if variance > 0 else Decimal("0")
+
+    for _ in range(iterations):
+        path: List[Decimal] = []
+        if method == "permuted":
+            shuffled = list(returns)
+            random.shuffle(shuffled)
+            if horizon_steps <= len(shuffled):
+                path = shuffled[:horizon_steps]
+            else:
+                path = [random.choice(shuffled) for _ in range(horizon_steps)]
+        elif method == "gbm":
+            mu = float(mean_return)
+            sigma = float(vol)
+            for _ in range(horizon_steps):
+                shock = random.gauss(mu, sigma)
+                path.append(Decimal(str(shock)))
+        else:
+            raise ValueError(f"Unsupported Monte Carlo method: {method}")
+
+        ending_equity, ruined = _simulate_drawdown_path(path, ruin_drawdown_pct)
+        sampled_end_equity.append(ending_equity)
+        if ruined:
+            ruin_hits += 1
+
+    sampled_end_equity.sort()
+    survival_probability = Decimal("1") - (Decimal(ruin_hits) / Decimal(iterations))
+    return {
+        "method": method,
+        "iterations": iterations,
+        "horizon_days": horizon_days,
+        "ruin_drawdown_pct": _format_decimal(ruin_drawdown_pct),
+        "survival_probability": _format_decimal(survival_probability),
+        "risk_of_ruin_probability": _format_decimal(Decimal("1") - survival_probability),
+        "expected_end_equity": _format_decimal(sum(sampled_end_equity, Decimal("0")) / Decimal(len(sampled_end_equity))),
+        "p05_end_equity": _format_decimal(sampled_end_equity[max(0, int(len(sampled_end_equity) * 0.05) - 1)]),
+        "p50_end_equity": _format_decimal(sampled_end_equity[max(0, int(len(sampled_end_equity) * 0.50) - 1)]),
+        "p95_end_equity": _format_decimal(sampled_end_equity[max(0, int(len(sampled_end_equity) * 0.95) - 1)]),
+    }
+
+
+def _compute_survival_probability(
+    *,
+    returns: Sequence[Decimal],
+    horizon_days: int,
+    ruin_drawdown_pct: Decimal,
+    inventory_ratio: Decimal,
+) -> Dict[str, str]:
+    if len(returns) < 2:
+        return {
+            "survival_probability": "1.00000000",
+            "risk_of_ruin_probability": "0.00000000",
+            "volatility_per_step": "0.00000000",
+            "inventory_skew": _format_decimal(abs(inventory_ratio - Decimal("0.5")) * Decimal("2")),
+        }
+
+    mean_return = sum(returns, Decimal("0")) / Decimal(len(returns))
+    variance = sum(((ret - mean_return) ** 2 for ret in returns), Decimal("0")) / Decimal(max(1, len(returns) - 1))
+    vol = variance.sqrt() if variance > 0 else Decimal("0")
+    horizon_steps = Decimal(horizon_days * 24 * 60)
+    sigma_h = vol * Decimal(str(math.sqrt(float(horizon_steps))))
+    drift_h = mean_return * horizon_steps
+
+    skew = abs(inventory_ratio - Decimal("0.5")) * Decimal("2")
+    downside_exposure = max(Decimal("0.0001"), inventory_ratio * (Decimal("1") + (skew * Decimal("0.5"))))
+    ruin_return_boundary = -ruin_drawdown_pct / downside_exposure
+
+    if sigma_h <= 0:
+        ruin_probability = Decimal("0") if ruin_return_boundary < drift_h else Decimal("1")
+    else:
+        z = float((ruin_return_boundary - drift_h) / sigma_h)
+        ruin_probability = Decimal(str(_normal_cdf(z)))
+    ruin_probability = min(Decimal("1"), max(Decimal("0"), ruin_probability))
+    survival_probability = Decimal("1") - ruin_probability
+    return {
+        "survival_probability": _format_decimal(survival_probability),
+        "risk_of_ruin_probability": _format_decimal(ruin_probability),
+        "volatility_per_step": _format_decimal(vol),
+        "inventory_skew": _format_decimal(skew),
+    }
+
+
 def run_backtest(config: BotConfig, candles: Sequence[Candle], start_index: int, end_index: int) -> Dict[str, Any]:
     client = HistoricalRESTClient(product_id=config.product_id, candles=candles)
 
@@ -241,6 +377,35 @@ def parse_args() -> argparse.Namespace:
         default="1.1,1.25,1.4",
         help="Comma-separated ADX trending band multiplier candidates for WFO",
     )
+    parser.add_argument(
+        "--monte-carlo-enabled",
+        action="store_true",
+        help="Enable Monte Carlo stress testing using return permutation and/or GBM",
+    )
+    parser.add_argument(
+        "--monte-carlo-method",
+        default="both",
+        choices=["permuted", "gbm", "both"],
+        help="Monte Carlo simulation type",
+    )
+    parser.add_argument(
+        "--monte-carlo-iterations",
+        type=int,
+        default=1000,
+        help="Monte Carlo iteration count per method",
+    )
+    parser.add_argument(
+        "--survival-horizon-days",
+        type=int,
+        default=30,
+        help="Forward horizon (days) for survival probability and Monte Carlo",
+    )
+    parser.add_argument(
+        "--risk-of-ruin-drawdown-pct",
+        type=Decimal,
+        default=Decimal("0.20"),
+        help="Drawdown threshold used as risk-of-ruin event",
+    )
     return parser.parse_args()
 
 
@@ -309,6 +474,7 @@ def _run_walk_forward(
         )
 
     folds: List[Dict[str, Any]] = []
+    out_sample_returns: List[Decimal] = []
     cursor = start_index
     fold_id = 1
     while True:
@@ -381,6 +547,7 @@ def _run_walk_forward(
                 "out_sample_result": out_result,
             }
         )
+        out_sample_returns.extend(_returns_from_candles(candles, out_start, out_end))
 
         fold_id += 1
         cursor = out_start
@@ -392,7 +559,7 @@ def _run_walk_forward(
     avg_out_sample_pnl = total_out_sample_pnl / Decimal(len(folds))
     profitable_folds = sum(1 for fold in folds if Decimal(fold["out_sample_result"]["net_pnl_usd"]) > 0)
 
-    return {
+    result = {
         "mode": "walk_forward_optimization",
         "product_id": args.product_id.upper(),
         "grid_lines": grid_lines,
@@ -413,6 +580,21 @@ def _run_walk_forward(
         },
         "folds": folds,
     }
+    if args.monte_carlo_enabled and out_sample_returns:
+        methods = ["permuted", "gbm"] if args.monte_carlo_method == "both" else [args.monte_carlo_method]
+        result["monte_carlo"] = {
+            "simulations": [
+                _monte_carlo_simulation(
+                    returns=out_sample_returns,
+                    method=method,
+                    iterations=args.monte_carlo_iterations,
+                    horizon_days=args.survival_horizon_days,
+                    ruin_drawdown_pct=args.risk_of_ruin_drawdown_pct,
+                )
+                for method in methods
+            ]
+        }
+    return result
 
 
 def main() -> None:
@@ -450,6 +632,31 @@ def main() -> None:
                 state_db_path=str(Path(tmp_state) / f"grid_state_{grid_lines}.db"),
             )
             result = run_backtest(config=config, candles=candles, start_index=start_index, end_index=end_index)
+            if args.monte_carlo_enabled:
+                historical_returns = _returns_from_candles(candles, start_index, end_index)
+                methods = ["permuted", "gbm"] if args.monte_carlo_method == "both" else [args.monte_carlo_method]
+                inventory_ratio = Decimal("0")
+                starting_capital = args.paper_start_usd + (args.paper_start_base * candles[start_index][4])
+                if starting_capital > 0:
+                    inventory_ratio = (args.paper_start_base * candles[start_index][4]) / starting_capital
+                result["survival_probability"] = _compute_survival_probability(
+                    returns=historical_returns,
+                    horizon_days=args.survival_horizon_days,
+                    ruin_drawdown_pct=args.risk_of_ruin_drawdown_pct,
+                    inventory_ratio=inventory_ratio,
+                )
+                result["monte_carlo"] = {
+                    "simulations": [
+                        _monte_carlo_simulation(
+                            returns=historical_returns,
+                            method=method,
+                            iterations=args.monte_carlo_iterations,
+                            horizon_days=args.survival_horizon_days,
+                            ruin_drawdown_pct=args.risk_of_ruin_drawdown_pct,
+                        )
+                        for method in methods
+                    ]
+                }
             results.append(result)
 
     if len(results) == 1:

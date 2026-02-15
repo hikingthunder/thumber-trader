@@ -48,6 +48,8 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
       <div><div class="k">Portfolio (USD)</div><div class="v" id="portfolio-value-usd">{snapshot.get('portfolio_value_usd')}</div></div>
       <div><div class="k">Active Orders</div><div class="v" id="active-orders">{snapshot.get('active_orders')}</div></div>
       <div><div class="k">Fills</div><div class="v" id="fills">{snapshot.get('fills')}</div></div>
+      <div><div class="k">Survival Prob. (30d)</div><div class="v" id="survival-probability">{snapshot.get('risk_metrics', {}).get('survival_probability_30d', '1')}</div></div>
+      <div><div class="k">Risk of Ruin (30d)</div><div class="v" id="risk-of-ruin">{snapshot.get('risk_metrics', {}).get('risk_of_ruin_30d', '0')}</div></div>
     </div>
 
     <div class="card">
@@ -189,6 +191,8 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
       setText('portfolio-value-usd', snapshot.portfolio_value_usd);
       setText('active-orders', snapshot.active_orders);
       setText('fills', snapshot.fills);
+      setText('survival-probability', snapshot.risk_metrics?.survival_probability_30d);
+      setText('risk-of-ruin', snapshot.risk_metrics?.risk_of_ruin_30d);
 
       const ordersBody = document.getElementById('orders-body');
       if (ordersBody) {{
