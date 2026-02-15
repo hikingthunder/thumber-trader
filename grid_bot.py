@@ -18,6 +18,7 @@ import collections
 import json
 import importlib
 import logging
+import math
 import os
 import signal
 import sqlite3
@@ -96,6 +97,16 @@ class BotConfig:
     adx_range_band_multiplier: Decimal = Decimal(os.getenv("ADX_RANGE_BAND_MULTIPLIER", "0.8"))
     adx_trend_band_multiplier: Decimal = Decimal(os.getenv("ADX_TREND_BAND_MULTIPLIER", "1.25"))
     adx_trend_order_size_multiplier: Decimal = Decimal(os.getenv("ADX_TREND_ORDER_SIZE_MULTIPLIER", "0.7"))
+    hmm_regime_detection_enabled: bool = os.getenv("HMM_REGIME_DETECTION_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    hmm_states: int = int(os.getenv("HMM_STATES", "3"))
+    hmm_lookback: int = int(os.getenv("HMM_LOOKBACK", "120"))
+    hmm_iterations: int = int(os.getenv("HMM_ITERATIONS", "12"))
+    hmm_min_variance: Decimal = Decimal(os.getenv("HMM_MIN_VARIANCE", "0.00000001"))
     dynamic_inventory_cap_enabled: bool = os.getenv("DYNAMIC_INVENTORY_CAP_ENABLED", "false").strip().lower() in {
         "1",
         "true",
@@ -262,6 +273,8 @@ class GridBot:
         self._cached_atr_pct = Decimal("0")
         self._cached_adx = Decimal("0")
         self._market_regime = "UNKNOWN"
+        self._market_regime_source = "ADX"
+        self._market_regime_confidence = Decimal("0")
         self._active_inventory_cap_pct = self.config.max_btc_inventory_pct
         self.paper_balances = {
             "USD": self.config.paper_start_usd,
@@ -856,7 +869,14 @@ class GridBot:
         closes = [c[3] for c in candles]
         self._cached_atr_pct = self._estimate_atr_pct(candles)
         self._cached_adx = _adx(candles, self.config.adx_period)
-        self._market_regime = self._classify_market_regime(self._cached_adx)
+        hmm_regime = self._classify_market_regime_from_hmm(closes)
+        if hmm_regime is not None:
+            self._market_regime, self._market_regime_confidence = hmm_regime
+            self._market_regime_source = "HMM"
+        else:
+            self._market_regime = self._classify_market_regime(self._cached_adx)
+            self._market_regime_source = "ADX"
+            self._market_regime_confidence = Decimal("0")
         if len(closes) < max(self.config.trend_ema_fast, self.config.trend_ema_slow):
             logging.info("Trend data unavailable/insufficient; using NEUTRAL bias.")
             self._cached_trend_strength = Decimal("0")
@@ -911,6 +931,49 @@ class GridBot:
         if adx_value <= self.config.adx_ranging_threshold:
             return "RANGING"
         return "TRANSITION"
+
+    def _classify_market_regime_from_hmm(self, closes: List[Decimal]) -> Optional[Tuple[str, Decimal]]:
+        if not self.config.hmm_regime_detection_enabled:
+            return None
+
+        returns = _returns(closes[-(self.config.hmm_lookback + 1) :])
+        min_obs = max(20, self.config.hmm_states * 4)
+        if len(returns) < min_obs:
+            logging.debug("HMM regime detection skipped; need at least %s returns (have %s).", min_obs, len(returns))
+            return None
+
+        model = _fit_gaussian_hmm(
+            returns,
+            n_states=self.config.hmm_states,
+            iterations=self.config.hmm_iterations,
+            min_variance=self.config.hmm_min_variance,
+        )
+        if model is None:
+            return None
+
+        probs, means, variances = model
+        winner = max(range(len(probs)), key=lambda idx: probs[idx])
+        confidence = probs[winner]
+
+        vol_rank = sorted(range(len(variances)), key=lambda idx: variances[idx])
+        low_vol_state = vol_rank[0]
+        high_vol_state = vol_rank[-1]
+        if winner == low_vol_state:
+            regime = "RANGING"
+        elif winner == high_vol_state:
+            regime = "TRENDING"
+        else:
+            regime = "TRANSITION"
+
+        logging.info(
+            "HMM regime=%s confidence=%.3f state=%s mean=%.6f sigma=%.6f",
+            regime,
+            confidence,
+            winner,
+            means[winner],
+            math.sqrt(max(variances[winner], 0.0)),
+        )
+        return regime, Decimal(str(confidence))
 
     def _regime_band_multiplier(self) -> Decimal:
         if self._market_regime == "TRENDING":
@@ -1360,6 +1423,8 @@ class GridBot:
                 "trend_strength": str(self._cached_trend_strength),
                 "adx": str(self._cached_adx),
                 "market_regime": self._market_regime,
+                "market_regime_source": self._market_regime_source,
+                "market_regime_confidence": str(self._market_regime_confidence),
                 "atr_pct": str(self._cached_atr_pct),
                 "ranging_score": str(self.ranging_score()),
                 "maker_fee_pct": str(self._effective_maker_fee_pct),
@@ -2009,6 +2074,14 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("ADX band multipliers must be > 0")
     if config.adx_trend_order_size_multiplier <= 0:
         raise ValueError("ADX_TREND_ORDER_SIZE_MULTIPLIER must be > 0")
+    if config.hmm_states < 2:
+        raise ValueError("HMM_STATES must be >= 2")
+    if config.hmm_lookback < 30:
+        raise ValueError("HMM_LOOKBACK must be >= 30")
+    if config.hmm_iterations < 1:
+        raise ValueError("HMM_ITERATIONS must be >= 1")
+    if config.hmm_min_variance <= 0:
+        raise ValueError("HMM_MIN_VARIANCE must be > 0")
     if config.base_order_notional_usd <= 0:
         raise ValueError("BASE_ORDER_NOTIONAL_USD must be > 0")
     if config.min_notional_usd <= 0:
@@ -2195,6 +2268,113 @@ def _adx(candles: List[Tuple[int, Decimal, Decimal, Decimal]], period: int) -> D
 
     lookback = min(period, len(dx_values))
     return sum(dx_values[-lookback:], Decimal("0")) / Decimal(lookback)
+
+
+def _returns(closes: List[Decimal]) -> List[float]:
+    if len(closes) < 2:
+        return []
+    rets: List[float] = []
+    prev = closes[0]
+    for current in closes[1:]:
+        if prev > 0 and current > 0:
+            rets.append(float((current / prev) - Decimal("1")))
+        prev = current
+    return rets
+
+
+def _fit_gaussian_hmm(
+    observations: List[float],
+    n_states: int,
+    iterations: int,
+    min_variance: Decimal,
+) -> Optional[Tuple[List[float], List[float], List[float]]]:
+    t_len = len(observations)
+    if t_len < 2 or n_states < 2:
+        return None
+
+    eps = 1e-12
+    min_var = float(min_variance)
+    sorted_obs = sorted(observations)
+
+    means = [sorted_obs[int((idx + 1) * (t_len / (n_states + 1)))] for idx in range(n_states)]
+    obs_mean = sum(observations) / t_len
+    obs_var = sum((v - obs_mean) ** 2 for v in observations) / t_len
+    variances = [max(obs_var, min_var) for _ in range(n_states)]
+    init_prob = [1.0 / n_states for _ in range(n_states)]
+    trans = []
+    for i in range(n_states):
+        row = []
+        for j in range(n_states):
+            row.append(0.85 if i == j else 0.15 / max(1, n_states - 1))
+        trans.append(row)
+
+    def emission(x: float, mean: float, var: float) -> float:
+        var = max(var, min_var)
+        coeff = 1.0 / math.sqrt(2.0 * math.pi * var)
+        exponent = math.exp(-((x - mean) ** 2) / (2.0 * var))
+        return max(eps, coeff * exponent)
+
+    for _ in range(iterations):
+        b = [[emission(observations[t], means[i], variances[i]) for i in range(n_states)] for t in range(t_len)]
+        alpha = [[0.0 for _ in range(n_states)] for _ in range(t_len)]
+        beta = [[0.0 for _ in range(n_states)] for _ in range(t_len)]
+        scales = [0.0 for _ in range(t_len)]
+
+        for i in range(n_states):
+            alpha[0][i] = init_prob[i] * b[0][i]
+        scales[0] = max(eps, sum(alpha[0]))
+        for i in range(n_states):
+            alpha[0][i] /= scales[0]
+
+        for t in range(1, t_len):
+            for j in range(n_states):
+                alpha[t][j] = sum(alpha[t - 1][i] * trans[i][j] for i in range(n_states)) * b[t][j]
+            scales[t] = max(eps, sum(alpha[t]))
+            for j in range(n_states):
+                alpha[t][j] /= scales[t]
+
+        for i in range(n_states):
+            beta[-1][i] = 1.0
+        for t in range(t_len - 2, -1, -1):
+            for i in range(n_states):
+                beta[t][i] = sum(trans[i][j] * b[t + 1][j] * beta[t + 1][j] for j in range(n_states))
+                beta[t][i] /= max(eps, scales[t + 1])
+
+        gamma = [[0.0 for _ in range(n_states)] for _ in range(t_len)]
+        xi_sum = [[0.0 for _ in range(n_states)] for _ in range(n_states)]
+        for t in range(t_len):
+            norm = max(eps, sum(alpha[t][i] * beta[t][i] for i in range(n_states)))
+            for i in range(n_states):
+                gamma[t][i] = (alpha[t][i] * beta[t][i]) / norm
+
+        for t in range(t_len - 1):
+            denom = 0.0
+            for i in range(n_states):
+                for j in range(n_states):
+                    denom += alpha[t][i] * trans[i][j] * b[t + 1][j] * beta[t + 1][j]
+            denom = max(eps, denom)
+            for i in range(n_states):
+                for j in range(n_states):
+                    numer = alpha[t][i] * trans[i][j] * b[t + 1][j] * beta[t + 1][j]
+                    xi_sum[i][j] += numer / denom
+
+        for i in range(n_states):
+            init_prob[i] = gamma[0][i]
+            trans_denom = max(eps, sum(gamma[t][i] for t in range(t_len - 1)))
+            for j in range(n_states):
+                trans[i][j] = xi_sum[i][j] / trans_denom
+            row_sum = max(eps, sum(trans[i]))
+            for j in range(n_states):
+                trans[i][j] /= row_sum
+
+            gamma_sum = max(eps, sum(gamma[t][i] for t in range(t_len)))
+            means[i] = sum(gamma[t][i] * observations[t] for t in range(t_len)) / gamma_sum
+            var = sum(gamma[t][i] * ((observations[t] - means[i]) ** 2) for t in range(t_len)) / gamma_sum
+            variances[i] = max(var, min_var)
+
+    last_probs = gamma[-1]
+    total = max(eps, sum(last_probs))
+    return [p / total for p in last_probs], means, variances
 
 
 def _read_secret(var_name: str, file_var_name: str) -> Optional[str]:
