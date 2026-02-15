@@ -27,7 +27,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Sends a high-priority Telegram alert when API instability forces Safe Mode (optional token/chat-id configuration).
 - Applies risk controls (USD reserve, BTC inventory cap, stop-loss awareness).
 - Adds trend bias (EMA fast/slow over Coinbase candles) to be more defensive in downtrends.
-- Detects market regime via ADX and auto-adjusts grid width + buy order notional for trending vs ranging conditions.
+- Detects market regime via ADX (or optional HMM probabilistic states) and auto-adjusts grid width + buy order notional for trending vs ranging conditions.
 - In multi-asset mode, tightens correlated products' inventory caps when one asset is already near its own inventory limit.
 
 ## 1) Debian 13 / Proxmox LXC setup
@@ -190,6 +190,13 @@ ADX_TRENDING_THRESHOLD=25
 ADX_RANGE_BAND_MULTIPLIER=0.8
 ADX_TREND_BAND_MULTIPLIER=1.25
 ADX_TREND_ORDER_SIZE_MULTIPLIER=0.7
+
+# Optional probabilistic market regime classification via Gaussian HMM
+HMM_REGIME_DETECTION_ENABLED=false
+HMM_STATES=3
+HMM_LOOKBACK=120
+HMM_ITERATIONS=12
+HMM_MIN_VARIANCE=0.00000001
 
 STATE_DB_PATH=/opt/thumber-trader/grid_state.db
 # Optional legacy mirror for old tooling (disabled by default)
