@@ -255,6 +255,26 @@ class BotConfig:
     cross_asset_candle_lookback: int = int(os.getenv("CROSS_ASSET_CANDLE_LOOKBACK", "48"))
     cross_asset_refresh_seconds: int = int(os.getenv("CROSS_ASSET_REFRESH_SECONDS", "300"))
 
+    # multi-strategy stack (core + alpha + hedge on the same asset)
+    strategy_stack_enabled: bool = os.getenv("STRATEGY_STACK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    strategy_stack_layers: str = os.getenv("STRATEGY_STACK_LAYERS", "core,alpha,hedge")
+    core_layer_grid_band_multiplier: Decimal = Decimal(os.getenv("CORE_LAYER_GRID_BAND_MULTIPLIER", "1.35"))
+    core_layer_notional_multiplier: Decimal = Decimal(os.getenv("CORE_LAYER_NOTIONAL_MULTIPLIER", "0.85"))
+    alpha_layer_grid_band_multiplier: Decimal = Decimal(os.getenv("ALPHA_LAYER_GRID_BAND_MULTIPLIER", "0.60"))
+    alpha_layer_notional_multiplier: Decimal = Decimal(os.getenv("ALPHA_LAYER_NOTIONAL_MULTIPLIER", "0.60"))
+    alpha_layer_poll_seconds_multiplier: Decimal = Decimal(os.getenv("ALPHA_LAYER_POLL_SECONDS_MULTIPLIER", "0.50"))
+    hedging_layer_grid_band_multiplier: Decimal = Decimal(os.getenv("HEDGING_LAYER_GRID_BAND_MULTIPLIER", "0.75"))
+    hedging_layer_notional_multiplier: Decimal = Decimal(os.getenv("HEDGING_LAYER_NOTIONAL_MULTIPLIER", "0.30"))
+    hedging_layer_inventory_frac: Decimal = Decimal(os.getenv("HEDGING_LAYER_INVENTORY_FRAC", "0.15"))
+    hedging_layer_requires_downtrend: bool = os.getenv("HEDGING_LAYER_REQUIRES_DOWNTREND", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    strategy_layer_name: str = os.getenv("STRATEGY_LAYER_NAME", "single").strip().lower()
+    strategy_layer_mode: str = os.getenv("STRATEGY_LAYER_MODE", "standard").strip().lower()
+
     # cointegration-based pair trading overlay
     cointegration_pair_trading_enabled: bool = os.getenv("COINTEGRATION_PAIR_TRADING_ENABLED", "false").strip().lower() in {
         "1",
@@ -311,6 +331,7 @@ class SharedRiskState:
     def __init__(self):
         self.lock = threading.RLock()
         self.cross_asset_inventory_caps: Dict[str, Decimal] = {}
+        self.layer_inventory_ratios: Dict[Tuple[str, str], Decimal] = {}
         self.pairwise_correlations: Dict[Tuple[str, str], Decimal] = {}
         self.portfolio_beta = Decimal("0")
         self.cointegration_targets: Dict[str, Decimal] = {}
@@ -325,6 +346,21 @@ class SharedRiskState:
     def get_inventory_cap(self, product_id: str) -> Optional[Decimal]:
         with self.lock:
             return self.cross_asset_inventory_caps.get(product_id)
+
+    def set_layer_inventory_ratio(self, product_id: str, layer_name: str, ratio: Decimal) -> None:
+        key = (product_id.upper(), layer_name.lower())
+        with self.lock:
+            self.layer_inventory_ratios[key] = ratio
+
+    def get_layer_inventory_ratio(self, product_id: str, layer_name: str) -> Decimal:
+        key = (product_id.upper(), layer_name.lower())
+        with self.lock:
+            return self.layer_inventory_ratios.get(key, Decimal("0"))
+
+    def get_total_inventory_ratio(self, product_id: str) -> Decimal:
+        wanted = product_id.upper()
+        with self.lock:
+            return sum((ratio for (pid, _layer), ratio in self.layer_inventory_ratios.items() if pid == wanted), Decimal("0"))
 
     def set_correlation(self, left: str, right: str, value: Decimal) -> None:
         key = tuple(sorted((left, right)))
@@ -450,6 +486,11 @@ class GridStrategy(StrategyEngine):
         self.client = client
         self.config = config
         self.base_currency = self.config.product_id.split("-")[0]
+        self.layer_name = self.config.strategy_layer_name or "single"
+        self.layer_mode = self.config.strategy_layer_mode or "standard"
+        self._layer_notional_multiplier = self._resolve_layer_notional_multiplier()
+        self._layer_band_multiplier = self._resolve_layer_band_multiplier()
+        self._layer_poll_seconds_multiplier = self._resolve_layer_poll_multiplier()
         self.shared_paper_portfolio = shared_paper_portfolio
         self.shared_risk_state = shared_risk_state
         self.orders_path = orders_path
@@ -643,6 +684,7 @@ class GridStrategy(StrategyEngine):
                     self.last_price = current_price
                     self.last_trend_bias = trend_bias
                     self._notify_dashboard_update_locked()
+                await asyncio.to_thread(self._publish_layer_inventory_ratio, current_price)
                 if not await asyncio.to_thread(self._ha_refresh_active_lock):
                     logging.error("Lost HA active lease; stopping strategy to avoid split-brain execution.")
                     self._running = False
@@ -657,7 +699,7 @@ class GridStrategy(StrategyEngine):
             except Exception as exc:
                 logging.exception("Market loop error: %s", exc)
             if self._running:
-                await asyncio.sleep(self.config.poll_seconds)
+                await asyncio.sleep(self._layer_poll_sleep_seconds())
 
     async def _risk_monitor_loop(self) -> None:
         while self._running:
@@ -666,7 +708,7 @@ class GridStrategy(StrategyEngine):
                 await asyncio.to_thread(self._risk_monitor, current_price)
             except Exception as exc:
                 logging.exception("Risk loop error: %s", exc)
-            await asyncio.sleep(max(5, self.config.poll_seconds // 2))
+            await asyncio.sleep(max(5, int(self._layer_poll_sleep_seconds() // 2)))
 
     async def _api_health_monitor_loop(self) -> None:
         if not self.config.api_circuit_breaker_enabled:
@@ -1130,24 +1172,69 @@ class GridStrategy(StrategyEngine):
         )
         return levels
 
+
+    def _resolve_layer_band_multiplier(self) -> Decimal:
+        mode = self.layer_mode.lower()
+        if mode == "core":
+            return max(Decimal("0.1"), self.config.core_layer_grid_band_multiplier)
+        if mode == "alpha":
+            return max(Decimal("0.1"), self.config.alpha_layer_grid_band_multiplier)
+        if mode == "hedge":
+            return max(Decimal("0.1"), self.config.hedging_layer_grid_band_multiplier)
+        return Decimal("1")
+
+    def _resolve_layer_notional_multiplier(self) -> Decimal:
+        mode = self.layer_mode.lower()
+        if mode == "core":
+            return max(Decimal("0"), self.config.core_layer_notional_multiplier)
+        if mode == "alpha":
+            return max(Decimal("0"), self.config.alpha_layer_notional_multiplier)
+        if mode == "hedge":
+            return max(Decimal("0"), self.config.hedging_layer_notional_multiplier)
+        return Decimal("1")
+
+    def _resolve_layer_poll_multiplier(self) -> Decimal:
+        if self.layer_mode.lower() == "alpha":
+            return max(Decimal("0.1"), self.config.alpha_layer_poll_seconds_multiplier)
+        return Decimal("1")
+
+    def _layer_poll_sleep_seconds(self) -> float:
+        base = Decimal(max(1, self.config.poll_seconds))
+        return float(max(Decimal("1"), base * self._layer_poll_seconds_multiplier))
+
+    def _layer_adjusted_notional(self, notional: Decimal) -> Decimal:
+        return max(self.config.min_notional_usd, notional * self._layer_notional_multiplier)
+
+    def _hedge_layer_active(self) -> bool:
+        if self.layer_mode.lower() != "hedge":
+            return False
+        if not self.config.hedging_layer_requires_downtrend:
+            return True
+        return self.last_trend_bias == "DOWN" and self._market_regime == "TRENDING"
+
     def _effective_grid_band_pct(self, current_price: Decimal) -> Decimal:
         regime_band_multiplier = self._regime_band_multiplier()
         if not self.config.atr_enabled:
-            return self.config.grid_band_pct * regime_band_multiplier * self._vpin_band_multiplier
+            return self.config.grid_band_pct * regime_band_multiplier * self._vpin_band_multiplier * self._layer_band_multiplier
 
         candles = self._fetch_public_candles()
         atr = _atr(candles, self.config.atr_period)
         if atr <= 0:
-            return self.config.grid_band_pct * regime_band_multiplier * self._vpin_band_multiplier
+            return self.config.grid_band_pct * regime_band_multiplier * self._vpin_band_multiplier * self._layer_band_multiplier
 
         dynamic_pct = (atr * self.config.atr_band_multiplier) / current_price
         atr_band = max(self.config.atr_min_band_pct, min(dynamic_pct, self.config.atr_max_band_pct))
-        return atr_band * regime_band_multiplier * self._vpin_band_multiplier
+        return atr_band * regime_band_multiplier * self._vpin_band_multiplier * self._layer_band_multiplier
 
     def _place_initial_grid_orders(self, current_price: Decimal) -> None:
         trend_bias = self._get_trend_bias()
         buy_levels = [p for p in self.grid_levels if p < current_price]
         sell_levels = [p for p in self.grid_levels if p > current_price]
+
+        if self.layer_mode == "hedge":
+            buy_levels = []
+            if not self._hedge_layer_active():
+                sell_levels = []
 
         if trend_bias == "DOWN":
             # capital defense: avoid catching falling knife aggressively.
@@ -1160,7 +1247,7 @@ class GridStrategy(StrategyEngine):
         base_available = self._get_available_balance(self.base_currency)
         deployable_usd = usd_available * (Decimal("1") - self.config.quote_reserve_pct)
 
-        buy_budget_per_order = self._regime_adjusted_buy_notional(self._allocated_base_order_notional())
+        buy_budget_per_order = self._layer_adjusted_notional(self._regime_adjusted_buy_notional(self._allocated_base_order_notional()))
         max_buys = int(deployable_usd // buy_budget_per_order)
         buy_levels = buy_levels[:max_buys] if max_buys >= 0 else []
 
@@ -1212,11 +1299,14 @@ class GridStrategy(StrategyEngine):
                     self._add_event(f"Replacement SELL placed @ {new_price}")
 
             elif side == "SELL" and grid_index - 1 >= 0:
+                if self.layer_mode == "hedge":
+                    logging.info("Hedge layer sell filled at %s; skip replacement buy to preserve inverse posture.", fill_price)
+                    continue
                 if trend_bias == "DOWN":
                     logging.info("Sell filled at %s in downtrend; preserving capital (skip replacement buy).", fill_price)
                     continue
                 new_price = self.grid_levels[grid_index - 1]
-                usd_notional = self._regime_adjusted_buy_notional(Decimal(str(record["base_size"])) * fill_price)
+                usd_notional = self._layer_adjusted_notional(self._regime_adjusted_buy_notional(Decimal(str(record["base_size"])) * fill_price))
                 confidence = self._confidence_for_price(new_price)
                 new_id = self._place_grid_order(
                     side="BUY",
@@ -1328,6 +1418,15 @@ class GridStrategy(StrategyEngine):
                 self.orders[order_id]["rl_last_state"] = prev_state
                 self.orders[order_id]["rl_last_action"] = action
 
+    def _publish_layer_inventory_ratio(self, current_price: Decimal) -> None:
+        if self.shared_risk_state is None:
+            return
+        self.shared_risk_state.set_layer_inventory_ratio(
+            self.config.product_id,
+            self.layer_name,
+            self._btc_inventory_ratio(current_price),
+        )
+
     def _risk_monitor(self, current_price: Decimal) -> None:
         usd_bal = self._get_available_balance("USD")
         base_bal = self._get_available_balance(self.base_currency)
@@ -1338,6 +1437,7 @@ class GridStrategy(StrategyEngine):
             return
 
         base_ratio = base_notional / portfolio_value
+        self._publish_layer_inventory_ratio(current_price)
         effective_cap = self._effective_inventory_cap_pct()
         if base_ratio > effective_cap:
             logging.warning(
@@ -1386,6 +1486,16 @@ class GridStrategy(StrategyEngine):
             if self._btc_inventory_ratio(price) > self._effective_inventory_cap_pct():
                 logging.warning("Skipped BUY at %s due to %s inventory cap.", price, self.base_currency)
                 return None
+            if self.shared_risk_state is not None:
+                portfolio_ratio = self.shared_risk_state.get_total_inventory_ratio(self.config.product_id)
+                if portfolio_ratio > self.config.max_btc_inventory_pct:
+                    logging.warning(
+                        "Skipped BUY at %s because stacked strategy exposure %.2f%% exceeds MAX_BTC_INVENTORY_PCT %.2f%%.",
+                        price,
+                        float(portfolio_ratio * 100),
+                        float(self.config.max_btc_inventory_pct * 100),
+                    )
+                    return None
 
             usd_notional = max(usd_notional, self.config.min_notional_usd)
             base_size = self._q_base(usd_notional / price)
@@ -3935,6 +4045,22 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("API_HEALTH_WINDOW_SECONDS must be >= 60")
     if config.api_recovery_consecutive_minutes < 1:
         raise ValueError("API_RECOVERY_CONSECUTIVE_MINUTES must be >= 1")
+    if config.strategy_layer_mode not in {"standard", "core", "alpha", "hedge"}:
+        raise ValueError("STRATEGY_LAYER_MODE must be one of standard/core/alpha/hedge")
+    if config.strategy_stack_enabled:
+        layers = {item.strip().lower() for item in config.strategy_stack_layers.replace(";", ",").split(",") if item.strip()}
+        if not layers:
+            raise ValueError("STRATEGY_STACK_LAYERS must include at least one layer when stack is enabled")
+        if not layers.issubset({"core", "alpha", "hedge"}):
+            raise ValueError("STRATEGY_STACK_LAYERS supports only core, alpha, hedge")
+    if config.core_layer_grid_band_multiplier <= 0 or config.alpha_layer_grid_band_multiplier <= 0 or config.hedging_layer_grid_band_multiplier <= 0:
+        raise ValueError("Layer grid band multipliers must be > 0")
+    if config.core_layer_notional_multiplier < 0 or config.alpha_layer_notional_multiplier < 0 or config.hedging_layer_notional_multiplier < 0:
+        raise ValueError("Layer notional multipliers must be >= 0")
+    if config.alpha_layer_poll_seconds_multiplier <= 0:
+        raise ValueError("ALPHA_LAYER_POLL_SECONDS_MULTIPLIER must be > 0")
+    if not (Decimal("0") <= config.hedging_layer_inventory_frac <= Decimal("1")):
+        raise ValueError("HEDGING_LAYER_INVENTORY_FRAC must be in [0,1]")
 
 
 def _orders_path() -> Path:
@@ -4452,23 +4578,44 @@ class StrategyManager:
         ids = [item.strip().upper() for item in raw.replace(";", ",").split(",") if item.strip()]
         return ids or [self.config.product_id]
 
-    def _orders_path_for(self, product_id: str) -> Path:
-        base = _orders_path()
-        if len(self._product_ids()) <= 1:
-            return base
-        return base.with_name(f"{base.stem}_{product_id.lower()}{base.suffix}")
+    def _strategy_layers(self) -> List[str]:
+        raw = self.config.strategy_stack_layers or "core,alpha,hedge"
+        layers = [item.strip().lower() for item in raw.replace(";", ",").split(",") if item.strip()]
+        allowed = {"core", "alpha", "hedge"}
+        parsed = [layer for layer in layers if layer in allowed]
+        return parsed or ["core", "alpha", "hedge"]
 
-    def _db_path_for(self, product_id: str) -> str:
+    def _stack_members(self) -> List[Tuple[str, str]]:
+        products = self._product_ids()
+        if not self.config.strategy_stack_enabled:
+            return [(product_id, "single") for product_id in products]
+        members: List[Tuple[str, str]] = []
+        for product_id in products:
+            for layer in self._strategy_layers():
+                members.append((product_id, layer))
+        return members
+
+    def _orders_path_for(self, product_id: str, layer_name: str = "single") -> Path:
+        base = _orders_path()
+        members = self._stack_members()
+        if len(members) <= 1:
+            return base
+        suffix = f"{product_id.lower()}_{layer_name.lower()}" if self.config.strategy_stack_enabled else product_id.lower()
+        return base.with_name(f"{base.stem}_{suffix}{base.suffix}")
+
+    def _db_path_for(self, product_id: str, layer_name: str = "single") -> str:
         base = Path(self.config.state_db_path)
-        if len(self._product_ids()) <= 1:
+        members = self._stack_members()
+        if len(members) <= 1:
             return str(base)
-        return str(base.with_name(f"{base.stem}_{product_id.lower()}{base.suffix}"))
+        suffix = f"{product_id.lower()}_{layer_name.lower()}" if self.config.strategy_stack_enabled else product_id.lower()
+        return str(base.with_name(f"{base.stem}_{suffix}{base.suffix}"))
 
     def _shared_paper_portfolio(self) -> Optional[SharedPaperPortfolio]:
         if not self.config.paper_trading_mode or not self.config.shared_usd_reserve_enabled:
             return None
         portfolio = SharedPaperPortfolio(self.config.paper_start_usd)
-        for product_id in self._product_ids():
+        for product_id in {product_id for product_id, _layer in self._stack_members()}:
             base = product_id.split("-")[0]
             portfolio.apply_delta(base, self.config.paper_start_base)
         return portfolio
@@ -4757,15 +4904,22 @@ class StrategyManager:
 
     async def run(self) -> None:
         shared_portfolio = self._shared_paper_portfolio()
-        for product_id in self._product_ids():
-            engine_cfg = replace(self.config, product_id=product_id, state_db_path=self._db_path_for(product_id))
+        members = self._stack_members()
+        for product_id, layer_name in members:
+            engine_cfg = replace(
+                self.config,
+                product_id=product_id,
+                state_db_path=self._db_path_for(product_id, layer_name),
+                strategy_layer_name=layer_name,
+                strategy_layer_mode=(layer_name if self.config.strategy_stack_enabled else "standard"),
+            )
             if shared_portfolio is not None:
                 engine_cfg = replace(engine_cfg, paper_start_usd=Decimal("0"), paper_start_base=Decimal("0"), paper_start_btc=Decimal("0"))
             self.engines.append(
                 GridStrategy(
                     client=self.client,
                     config=engine_cfg,
-                    orders_path=self._orders_path_for(product_id),
+                    orders_path=self._orders_path_for(product_id, layer_name),
                     shared_paper_portfolio=shared_portfolio,
                     shared_risk_state=self._shared_risk_state,
                 )
