@@ -26,6 +26,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Exposes daily normalized PnL, turnover, and VaR/CVaR risk metrics in dashboard status.
 - Exposes Prometheus metrics (`/metrics` by default) for realized PnL, inventory skew, equity curve, portfolio beta, Coinbase API latency histogram, and API safe-mode state.
 - Includes an API-health operational circuit breaker that enters Safe Mode (pauses new BUY/entry orders) when latency/failure thresholds are breached, then auto-resumes after sustained recovery.
+- Adds optional sentiment-driven Safe Mode overrides (e.g., X/Twitter or news API feed) that cancel pending BUY orders and tighten inventory caps toward USD during panic regimes.
 - Sends a high-priority Telegram alert when API instability forces Safe Mode (optional token/chat-id configuration).
 - Applies risk controls (USD reserve, BTC inventory cap, stop-loss awareness).
 - Adds trend bias (EMA fast/slow over Coinbase candles) to be more defensive in downtrends.
@@ -150,6 +151,17 @@ API_LATENCY_P95_THRESHOLD_MS=2000
 API_FAILURE_RATE_THRESHOLD_PCT=0.05
 API_HEALTH_WINDOW_SECONDS=300
 API_RECOVERY_CONSECUTIVE_MINUTES=5
+
+# Optional sentiment override (expects JSON score from SENTIMENT_SOURCE_URL)
+SENTIMENT_OVERRIDE_ENABLED=false
+SENTIMENT_SOURCE_URL=
+SENTIMENT_API_BEARER_TOKEN=
+SENTIMENT_JSON_PATH=score
+SENTIMENT_ASSET_QUERY_PARAM=symbol
+SENTIMENT_REFRESH_SECONDS=300
+SENTIMENT_LOOKBACK_SECONDS=3600
+SENTIMENT_NEGATIVE_THRESHOLD=-0.6
+SENTIMENT_SAFE_INVENTORY_CAP_PCT=0.20
 
 # Optional Telegram alerting + command-and-control
 TELEGRAM_BOT_TOKEN=
@@ -339,6 +351,8 @@ Included metrics:
 - `bot_portfolio_beta` (gauge): portfolio beta versus BTC benchmark returns.
 - `api_latency_milliseconds` (histogram): latency distribution for Coinbase REST/public calls.
 - `bot_api_safe_mode` (gauge): `1` when API circuit breaker Safe Mode is active and new entry (BUY) orders are paused.
+- `bot_sentiment_safe_mode` (gauge): `1` when sentiment panic Safe Mode is active.
+- `bot_sentiment_score_1h` (gauge): rolling one-hour sentiment score used by the override.
 
 This makes it straightforward to build a Grafana dashboard that overlays strategy outputs (equity / PnL per $1k) with API health (latency).
 
@@ -398,7 +412,7 @@ journalctl -u thumber-gridbot.service -f
 
 ## Operational notes
 
-- This bot uses only Coinbase data for trend bias; no third-party sentiment feed is required.
+- Trend bias is computed from Coinbase market data; sentiment-safe-mode integration is optional and disabled by default.
 - No strategy can guarantee profit or fully eliminate drawdown risk.
 - Start with small size, validate behavior in logs, then scale.
 
