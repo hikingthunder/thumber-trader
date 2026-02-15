@@ -2961,15 +2961,18 @@ class GridStrategy(StrategyEngine):
         raw_path = requested_path.strip() or ".env"
         candidate = Path(raw_path).expanduser()
         resolved = candidate.resolve(strict=False)
-        cwd = Path.cwd().resolve()
-        allowed_roots = [cwd]
+        repo_root = Path.cwd().resolve()
+        allowed_roots = [repo_root]
         bot_env_override = os.getenv("BOT_ENV_PATH")
         if bot_env_override:
-            allowed_roots.append(Path(bot_env_override).expanduser().resolve(strict=False))
+            override_path = Path(bot_env_override).expanduser().resolve(strict=False)
+            if override_path == repo_root or repo_root in override_path.parents:
+                allowed_roots.append(override_path)
         for root in allowed_roots:
             if resolved == root or root in resolved.parents:
+                if resolved.is_dir() or resolved.suffix in {".py", ".pyc", ".pyo"}:
+                    raise ValueError("env_path cannot be a directory or a Python file")
                 return resolved
-        raise ValueError("env_path must stay within the repository or configured BOT_ENV_PATH")
 
     def _start_dashboard_server(self) -> None:
         bot = self
