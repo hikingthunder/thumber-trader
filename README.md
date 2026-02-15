@@ -520,6 +520,8 @@ journalctl -u thumber-gridbot.service -f
 
 All fills are stored in SQLite (`fills` table) and can be exported to CSV for accounting/tax workflows.
 
+Tax lot accounting is also tracked in SQLite (`tax_lots` + `tax_lot_matches`). Set `TAX_LOT_METHOD=FIFO`, `LIFO`, or `HIFO` to control how sells are matched against open buy lots (also switchable live from dashboard).
+
 Export all fills:
 
 ```bash
@@ -540,6 +542,8 @@ If dashboard is enabled, you can also download CSV directly:
 
 - `http://127.0.0.1:8080/api/tax_report.csv`
 - `http://127.0.0.1:8080/api/tax_report.csv?year=2025`
+
+CSV now includes lot metadata columns `tax_lot_method` and `realized_pnl_usd` for each fill.
 
 
 ## Code layout (modularized)

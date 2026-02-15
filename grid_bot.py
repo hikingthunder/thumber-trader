@@ -55,6 +55,28 @@ class HMMModelSnapshot:
     training_returns: List[float]
 
 
+@dataclass
+class TaxLotMatch:
+    lot_id: int
+    matched_base_size: Decimal
+    buy_price: Decimal
+    sell_price: Decimal
+    proceeds_usd: Decimal
+    cost_basis_usd: Decimal
+    realized_pnl_usd: Decimal
+    acquired_ts: float
+
+
+@dataclass
+class TaxLotSellResult:
+    matched_base_size: Decimal
+    unmatched_base_size: Decimal
+    total_proceeds_usd: Decimal
+    total_cost_basis_usd: Decimal
+    total_realized_pnl_usd: Decimal
+    matches: List[TaxLotMatch]
+
+
 
 
 
@@ -225,6 +247,7 @@ class BotConfig:
         "yes",
         "on",
     }
+    tax_lot_method: str = os.getenv("TAX_LOT_METHOD", "FIFO").strip().upper()
 
     # safe start
     safe_start_enabled: bool = os.getenv("SAFE_START_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -548,6 +571,7 @@ class GridStrategy(StrategyEngine):
         self._daily_day_index = int(time.time() // 86400)
         self._paper_inventory_cost_usd = self.config.paper_start_base * self.grid_anchor_price
         self._realized_pnl_total = Decimal("0")
+        self._tax_lot_method = self._normalize_tax_lot_method(self.config.tax_lot_method)
         self._api_latency_buckets_ms = [50, 100, 250, 500, 1000, 2000, 5000, 10000]
         self._api_latency_bucket_counts = [0 for _ in self._api_latency_buckets_ms]
         self._api_latency_observation_count = 0
@@ -2329,6 +2353,7 @@ class GridStrategy(StrategyEngine):
 
     def _dashboard_stream_snapshot(self) -> Dict[str, Any]:
         chart = self._dashboard_chart_snapshot()
+        tax_lot_summary = self._tax_lot_summary()
         with self._state_lock:
             return {
                 "product_id": self.config.product_id,
@@ -2340,6 +2365,7 @@ class GridStrategy(StrategyEngine):
                 "orders": self.orders,
                 "recent_events": list(self.recent_events),
                 "chart": chart,
+                "tax_lots": tax_lot_summary,
             }
 
     def _roll_daily_metrics_window(self) -> None:
@@ -2713,6 +2739,7 @@ class GridStrategy(StrategyEngine):
 
     def _status_snapshot(self) -> Dict[str, Any]:
         chart = self._dashboard_chart_snapshot()
+        tax_lot_summary = self._tax_lot_summary()
         with self._state_lock:
             price = self.last_price
             usd_bal = self._get_available_balance("USD")
@@ -2784,6 +2811,7 @@ class GridStrategy(StrategyEngine):
                 "maker_fee_pct": str(self._effective_maker_fee_pct),
                 "daily_realized_pnl_usd": str(self._daily_realized_pnl),
                 "realized_pnl_total_usd": str(self._realized_pnl_total),
+                "tax_lots": tax_lot_summary,
                 "daily_pnl_per_1k": str(pnl_per_1k),
                 "daily_turnover_ratio": str(turnover_ratio),
                 "api_safe_mode": self._api_safe_mode,
@@ -2802,7 +2830,7 @@ class GridStrategy(StrategyEngine):
 
     def _tax_report_csv(self, year: Optional[int] = None) -> str:
         rows = self._fetch_fills(year=year)
-        lines = ["ts_iso,product_id,side,price,base_size,gross_notional_usd,fee_paid_usd,net_notional_usd,order_id,grid_index"]
+        lines = ["ts_iso,product_id,side,price,base_size,gross_notional_usd,fee_paid_usd,net_notional_usd,order_id,grid_index,tax_lot_method,realized_pnl_usd"]
         for row in rows:
             ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(row[0])))
             price = Decimal(str(row[3]))
@@ -2823,13 +2851,15 @@ class GridStrategy(StrategyEngine):
                         str(net),
                         str(row[6]),
                         str(row[7]),
+                        str(row[8]) if len(row) > 8 else "FIFO",
+                        str(row[9]) if len(row) > 9 else "0",
                     ]
                 )
             )
         return "\n".join(lines) + "\n"
 
     def _fetch_fills(self, year: Optional[int] = None) -> List[Tuple[Any, ...]]:
-        query = "SELECT ts, product_id, side, price, base_size, fee_paid, order_id, grid_index FROM fills"
+        query = "SELECT ts, product_id, side, price, base_size, fee_paid, order_id, grid_index, tax_lot_method, realized_pnl_usd FROM fills"
         params: Tuple[Any, ...] = ()
         if year is not None:
             start_ts = time.mktime(time.strptime(f"{year}-01-01", "%Y-%m-%d"))
@@ -2840,6 +2870,27 @@ class GridStrategy(StrategyEngine):
         with self._db_lock:
             cur = self._db.cursor()
             return cur.execute(query, params).fetchall()
+
+    def _tax_lot_summary(self) -> Dict[str, str]:
+        with self._db_lock:
+            row = self._db.execute(
+                """
+                SELECT COUNT(*), COALESCE(SUM(CAST(remaining_base_size AS REAL)), 0),
+                       COALESCE(SUM(CAST(remaining_base_size AS REAL) * CAST(buy_price AS REAL)), 0)
+                FROM tax_lots
+                WHERE product_id = ? AND CAST(remaining_base_size AS REAL) > 0
+                """,
+                (self.config.product_id,),
+            ).fetchone()
+        lot_count = int(row[0]) if row else 0
+        remaining_base = Decimal(str(row[1])) if row else Decimal("0")
+        remaining_cost = Decimal(str(row[2])) if row else Decimal("0")
+        return {
+            "method": self._active_lot_method(),
+            "open_lots": str(lot_count),
+            "remaining_base_size": str(remaining_base),
+            "remaining_cost_basis_usd": str(remaining_cost),
+        }
 
     def _load_recent_fills_for_dashboard(self, limit: int = 40) -> List[Dict[str, str]]:
         rows = self._fetch_fills()
@@ -2852,6 +2903,8 @@ class GridStrategy(StrategyEngine):
                     "price": str(row[3]),
                     "base_size": str(row[4]),
                     "order_id": str(row[6]),
+                    "tax_lot_method": str(row[8]) if len(row) > 8 else "FIFO",
+                    "realized_pnl_usd": str(row[9]) if len(row) > 9 else "0",
                 }
             )
         return fills
@@ -3279,6 +3332,12 @@ class GridStrategy(StrategyEngine):
             saved = self._save_config_updates(env_path, updates)
             self._add_event(f"Config file updated: {','.join(saved)}")
             return {"ok": True, "action": action, "saved": saved, "env_path": str(env_path)}
+        if action == "set_tax_lot_method":
+            selected = self._normalize_tax_lot_method(str(payload.get("method", "FIFO")))
+            self.config.tax_lot_method = selected
+            self._tax_lot_method = selected
+            self._add_event(f"Tax lot method set to {selected}")
+            return {"ok": True, "action": action, "tax_lot_method": selected}
         return {"ok": False, "error": f"unsupported action {action}"}
 
     def _apply_runtime_config_updates(self, updates: Dict[str, Any]) -> List[str]:
@@ -3293,6 +3352,9 @@ class GridStrategy(StrategyEngine):
                 continue
             parsed = self._parse_config_value(raw_text, field["type"])
             setattr(self.config, field["attr"], parsed)
+            if env_name == "TAX_LOT_METHOD":
+                self._tax_lot_method = self._normalize_tax_lot_method(str(parsed))
+                self.config.tax_lot_method = self._tax_lot_method
             applied.append(env_name)
         _validate_config(self.config)
         return applied
@@ -3311,6 +3373,10 @@ class GridStrategy(StrategyEngine):
                 continue
             parsed = self._parse_config_value(raw_text, field["type"])
             setattr(self.config, field["attr"], parsed)
+            if env_name == "TAX_LOT_METHOD":
+                self._tax_lot_method = self._normalize_tax_lot_method(str(parsed))
+                self.config.tax_lot_method = self._tax_lot_method
+                parsed = self._tax_lot_method
             normalized[env_name] = str(parsed).lower() if field["type"] == "bool" else str(parsed)
 
         _validate_config(self.config)
@@ -3368,7 +3434,43 @@ class GridStrategy(StrategyEngine):
                     base_size TEXT NOT NULL,
                     fee_paid TEXT NOT NULL,
                     grid_index INTEGER NOT NULL,
-                    order_id TEXT NOT NULL
+                    order_id TEXT NOT NULL,
+                    tax_lot_method TEXT NOT NULL DEFAULT 'FIFO',
+                    realized_pnl_usd TEXT NOT NULL DEFAULT '0'
+                )
+            """)
+            self._ensure_fills_columns(cur)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tax_lots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    buy_fill_id INTEGER,
+                    acquired_ts REAL NOT NULL,
+                    product_id TEXT NOT NULL,
+                    buy_price TEXT NOT NULL,
+                    original_base_size TEXT NOT NULL,
+                    remaining_base_size TEXT NOT NULL,
+                    fee_paid_usd TEXT NOT NULL,
+                    closed_ts REAL,
+                    created_ts REAL NOT NULL,
+                    updated_ts REAL NOT NULL,
+                    FOREIGN KEY(buy_fill_id) REFERENCES fills(id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tax_lot_matches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sell_fill_id INTEGER NOT NULL,
+                    lot_id INTEGER NOT NULL,
+                    matched_base_size TEXT NOT NULL,
+                    buy_price TEXT NOT NULL,
+                    sell_price TEXT NOT NULL,
+                    proceeds_usd TEXT NOT NULL,
+                    cost_basis_usd TEXT NOT NULL,
+                    realized_pnl_usd TEXT NOT NULL,
+                    acquired_ts REAL NOT NULL,
+                    created_ts REAL NOT NULL,
+                    FOREIGN KEY(sell_fill_id) REFERENCES fills(id),
+                    FOREIGN KEY(lot_id) REFERENCES tax_lots(id)
                 )
             """)
             cur.execute("""
@@ -3407,6 +3509,16 @@ class GridStrategy(StrategyEngine):
                 )
             """)
             self._db.commit()
+
+    def _ensure_fills_columns(self, cur: sqlite3.Cursor) -> None:
+        existing = {row[1] for row in cur.execute("PRAGMA table_info(fills)").fetchall() if len(row) > 1}
+        needed = {
+            "tax_lot_method": "TEXT NOT NULL DEFAULT 'FIFO'",
+            "realized_pnl_usd": "TEXT NOT NULL DEFAULT '0'",
+        }
+        for column, ddl in needed.items():
+            if column not in existing:
+                cur.execute(f"ALTER TABLE fills ADD COLUMN {column} {ddl}")
 
     def _ensure_daily_stats_columns(self, cur: sqlite3.Cursor) -> None:
         existing = {row[1] for row in cur.execute("PRAGMA table_info(daily_stats)").fetchall() if len(row) > 1}
@@ -3597,36 +3709,180 @@ class GridStrategy(StrategyEngine):
             }
         return orders
 
+    def _normalize_tax_lot_method(self, method: str) -> str:
+        normalized = str(method or "FIFO").strip().upper()
+        return normalized if normalized in {"FIFO", "LIFO", "HIFO"} else "FIFO"
+
+    def _active_lot_method(self) -> str:
+        return self._normalize_tax_lot_method(getattr(self.config, "tax_lot_method", self._tax_lot_method))
+
+    def _consume_tax_lots(self, sell_size: Decimal, sell_price: Decimal, fee_paid: Decimal, method: str) -> TaxLotSellResult:
+        lot_rows = self._db.execute(
+            """
+            SELECT id, acquired_ts, buy_price, remaining_base_size
+            FROM tax_lots
+            WHERE product_id = ? AND CAST(remaining_base_size AS REAL) > 0
+            """,
+            (self.config.product_id,),
+        ).fetchall()
+        lots: List[Tuple[int, float, Decimal, Decimal]] = []
+        for row in lot_rows:
+            remaining = Decimal(str(row[3]))
+            if remaining <= 0:
+                continue
+            lots.append((int(row[0]), float(row[1]), Decimal(str(row[2])), remaining))
+
+        if method == "FIFO":
+            ordered = sorted(lots, key=lambda item: (item[1], item[0]))
+        elif method == "LIFO":
+            ordered = sorted(lots, key=lambda item: (item[1], item[0]), reverse=True)
+        else:
+            ordered = sorted(lots, key=lambda item: (item[2], item[1], item[0]), reverse=True)
+
+        remaining_to_match = sell_size
+        matches: List[TaxLotMatch] = []
+        total_proceeds = Decimal("0")
+        total_cost_basis = Decimal("0")
+        fee_rate = (fee_paid / sell_size) if sell_size > 0 else Decimal("0")
+        now_ts = time.time()
+
+        for lot_id, acquired_ts, buy_price, remaining_size in ordered:
+            if remaining_to_match <= 0:
+                break
+            match_size = min(remaining_to_match, remaining_size)
+            if match_size <= 0:
+                continue
+            proceeds = (sell_price * match_size) - (fee_rate * match_size)
+            cost_basis = buy_price * match_size
+            pnl = proceeds - cost_basis
+            matches.append(
+                TaxLotMatch(
+                    lot_id=lot_id,
+                    matched_base_size=match_size,
+                    buy_price=buy_price,
+                    sell_price=sell_price,
+                    proceeds_usd=proceeds,
+                    cost_basis_usd=cost_basis,
+                    realized_pnl_usd=pnl,
+                    acquired_ts=acquired_ts,
+                )
+            )
+            total_proceeds += proceeds
+            total_cost_basis += cost_basis
+            remaining_to_match -= match_size
+
+            next_remaining = remaining_size - match_size
+            self._db.execute(
+                "UPDATE tax_lots SET remaining_base_size = ?, updated_ts = ?, closed_ts = CASE WHEN ? <= 0 THEN ? ELSE closed_ts END WHERE id = ?",
+                (str(max(Decimal("0"), next_remaining)), now_ts, str(next_remaining), now_ts, lot_id),
+            )
+
+        return TaxLotSellResult(
+            matched_base_size=sell_size - remaining_to_match,
+            unmatched_base_size=max(Decimal("0"), remaining_to_match),
+            total_proceeds_usd=total_proceeds,
+            total_cost_basis_usd=total_cost_basis,
+            total_realized_pnl_usd=total_proceeds - total_cost_basis,
+            matches=matches,
+        )
+
     def _record_fill(self, order_id: str, record: Dict[str, Any], fill_price: Decimal) -> None:
         fill_ts = time.time()
-        fee_paid = fill_price * Decimal(str(record.get("base_size", "0"))) * self._effective_maker_fee_pct
+        base_size = Decimal(str(record.get("base_size", "0")))
+        fee_paid = fill_price * base_size * self._effective_maker_fee_pct
+        side = str(record.get("side", "")).upper()
+        method = self._active_lot_method()
+        realized_pnl = Decimal("0")
+
         with self._db_lock:
-            self._db.execute(
+            cur = self._db.cursor()
+            cur.execute(
                 """
-                INSERT INTO fills(ts, product_id, side, price, base_size, fee_paid, grid_index, order_id)
-                VALUES(?,?,?,?,?,?,?,?)
+                INSERT INTO fills(ts, product_id, side, price, base_size, fee_paid, grid_index, order_id, tax_lot_method, realized_pnl_usd)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     fill_ts,
                     self.config.product_id,
-                    str(record.get("side", "")),
+                    side,
                     str(fill_price),
-                    str(record.get("base_size", "0")),
+                    str(base_size),
                     str(fee_paid),
                     int(record.get("grid_index", 0)),
                     order_id,
+                    method,
+                    "0",
                 ),
             )
+            fill_id = int(cur.lastrowid)
+
+            if side == "BUY":
+                cur.execute(
+                    """
+                    INSERT INTO tax_lots(
+                        buy_fill_id, acquired_ts, product_id, buy_price, original_base_size, remaining_base_size,
+                        fee_paid_usd, closed_ts, created_ts, updated_ts
+                    )
+                    VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        fill_id,
+                        fill_ts,
+                        self.config.product_id,
+                        str(fill_price),
+                        str(base_size),
+                        str(base_size),
+                        str(fee_paid),
+                        None,
+                        fill_ts,
+                        fill_ts,
+                    ),
+                )
+            elif side == "SELL" and base_size > 0:
+                sell_result = self._consume_tax_lots(base_size, fill_price, fee_paid, method)
+                realized_pnl = sell_result.total_realized_pnl_usd
+                for match in sell_result.matches:
+                    cur.execute(
+                        """
+                        INSERT INTO tax_lot_matches(
+                            sell_fill_id, lot_id, matched_base_size, buy_price, sell_price,
+                            proceeds_usd, cost_basis_usd, realized_pnl_usd, acquired_ts, created_ts
+                        )
+                        VALUES(?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            fill_id,
+                            match.lot_id,
+                            str(match.matched_base_size),
+                            str(match.buy_price),
+                            str(match.sell_price),
+                            str(match.proceeds_usd),
+                            str(match.cost_basis_usd),
+                            str(match.realized_pnl_usd),
+                            match.acquired_ts,
+                            fill_ts,
+                        ),
+                    )
+                if sell_result.unmatched_base_size > 0:
+                    logging.warning(
+                        "Sell fill %s has unmatched base size %s %s for lot accounting.",
+                        order_id,
+                        sell_result.unmatched_base_size,
+                        self.base_currency,
+                    )
+            cur.execute("UPDATE fills SET realized_pnl_usd = ? WHERE id = ?", (str(realized_pnl), fill_id))
             self._db.commit()
 
         with self._state_lock:
             self._dashboard_recent_fills.append(
                 {
                     "ts": str(fill_ts),
-                    "side": str(record.get("side", "")),
+                    "side": side,
                     "price": str(fill_price),
-                    "base_size": str(record.get("base_size", "0")),
+                    "base_size": str(base_size),
                     "order_id": order_id,
+                    "tax_lot_method": method,
+                    "realized_pnl_usd": str(realized_pnl),
                 }
             )
             self._dashboard_recent_fills = self._dashboard_recent_fills[-40:]
@@ -4011,6 +4267,8 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("BASE_BUY_EXECUTION_WINDOW_SECONDS must be >= 0")
     if config.base_buy_vwap_lookback_candles < 1:
         raise ValueError("BASE_BUY_VWAP_LOOKBACK_CANDLES must be >= 1")
+    if str(config.tax_lot_method).strip().upper() not in {"FIFO", "LIFO", "HIFO"}:
+        raise ValueError("TAX_LOT_METHOD must be FIFO, LIFO, or HIFO")
     if not any(item.strip() for item in config.product_ids.replace(";", ",").split(",")):
         raise ValueError("PRODUCT_IDS must include at least one product id")
     if not (Decimal("0") <= config.cross_asset_correlation_threshold <= Decimal("1")):
@@ -4070,7 +4328,7 @@ def _orders_path() -> Path:
 def export_tax_report_csv(db_path: str, output_path: Path, year: Optional[int] = None) -> int:
     conn = sqlite3.connect(db_path)
     try:
-        query = "SELECT ts, product_id, side, price, base_size, fee_paid, order_id, grid_index FROM fills"
+        query = "SELECT ts, product_id, side, price, base_size, fee_paid, order_id, grid_index, tax_lot_method, realized_pnl_usd FROM fills"
         params: Tuple[Any, ...] = ()
         if year is not None:
             start_ts = time.mktime(time.strptime(f"{year}-01-01", "%Y-%m-%d"))
@@ -4082,7 +4340,7 @@ def export_tax_report_csv(db_path: str, output_path: Path, year: Optional[int] =
     finally:
         conn.close()
 
-    lines = ["ts_iso,product_id,side,price,base_size,gross_notional_usd,fee_paid_usd,net_notional_usd,order_id,grid_index"]
+    lines = ["ts_iso,product_id,side,price,base_size,gross_notional_usd,fee_paid_usd,net_notional_usd,order_id,grid_index,tax_lot_method,realized_pnl_usd"]
     for row in rows:
         ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(row[0])))
         price = Decimal(str(row[3]))
@@ -4103,6 +4361,8 @@ def export_tax_report_csv(db_path: str, output_path: Path, year: Optional[int] =
                     str(net),
                     str(row[6]),
                     str(row[7]),
+                    str(row[8]),
+                    str(row[9]),
                 ]
             )
         )
