@@ -28,6 +28,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import secrets
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import dataclass, replace
@@ -40,6 +41,8 @@ from dashboard_views import render_config_html, render_dashboard_home_html
 
 
 getcontext().prec = 28
+
+MASKED_SECRET_PLACEHOLDER = "********"
 
 
 
@@ -168,6 +171,8 @@ class BotConfig:
     dashboard_enabled: bool = os.getenv("DASHBOARD_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     dashboard_host: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
     dashboard_port: int = int(os.getenv("DASHBOARD_PORT", "8080"))
+    dashboard_auth_token: str = os.getenv("DASHBOARD_AUTH_TOKEN", "")
+    dashboard_max_request_bytes: int = int(os.getenv("DASHBOARD_MAX_REQUEST_BYTES", "1048576"))
     prometheus_enabled: bool = os.getenv("PROMETHEUS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     prometheus_path: str = os.getenv("PROMETHEUS_PATH", "/metrics")
 
@@ -2220,7 +2225,7 @@ class GridStrategy(StrategyEngine):
                 "recent_events": list(self.recent_events),
                 "orders": self.orders,
                 "chart": chart,
-                "config": self._config_snapshot(),
+                "config": self._safe_config_snapshot(),
             }
 
     def _tax_report_csv(self, year: Optional[int] = None) -> str:
@@ -2300,11 +2305,56 @@ class GridStrategy(StrategyEngine):
             return value.lower() in {"1", "true", "yes", "on"}
         raise ValueError(f"Unsupported config type: {value_type}")
 
+    def _is_dashboard_request_authorized(self, headers: Any) -> bool:
+        expected = self.config.dashboard_auth_token.strip()
+        if not expected:
+            return True
+        auth_header = str(headers.get("Authorization", "")).strip()
+        if auth_header.startswith("Bearer "):
+            presented = auth_header[7:].strip()
+        else:
+            presented = str(headers.get("X-Dashboard-Token", "")).strip()
+        if not presented:
+            return False
+        return secrets.compare_digest(presented, expected)
+
+    def _is_sensitive_config_field(self, env_name: str) -> bool:
+        upper = env_name.upper()
+        sensitive_fragments = ("TOKEN", "SECRET", "KEY", "PASSWORD", "PASSPHRASE")
+        return any(fragment in upper for fragment in sensitive_fragments)
+
+    def _safe_config_snapshot(self) -> Dict[str, str]:
+        redacted: Dict[str, str] = {}
+        for key, value in self._config_snapshot().items():
+            if self._is_sensitive_config_field(key) and str(value).strip():
+                redacted[key] = MASKED_SECRET_PLACEHOLDER
+            else:
+                redacted[key] = value
+        return redacted
+
+    def _resolve_env_path(self, requested_path: str) -> Path:
+        raw_path = requested_path.strip() or ".env"
+        candidate = Path(raw_path).expanduser()
+        resolved = candidate.resolve(strict=False)
+        cwd = Path.cwd().resolve()
+        allowed_roots = [cwd]
+        bot_env_override = os.getenv("BOT_ENV_PATH")
+        if bot_env_override:
+            allowed_roots.append(Path(bot_env_override).expanduser().resolve(strict=False))
+        for root in allowed_roots:
+            if resolved == root or root in resolved.parents:
+                return resolved
+        raise ValueError("env_path must stay within the repository or configured BOT_ENV_PATH")
+
     def _start_dashboard_server(self) -> None:
         bot = self
 
         class DashboardHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
+                if not bot._is_dashboard_request_authorized(self.headers):
+                    self.send_error(HTTPStatus.UNAUTHORIZED, "Unauthorized")
+                    return
+
                 parsed = urllib.parse.urlparse(self.path)
                 if parsed.path == "/api/status":
                     payload = json.dumps(bot._status_snapshot(), indent=2).encode("utf-8")
@@ -2329,8 +2379,13 @@ class GridStrategy(StrategyEngine):
                                 bot._dashboard_update_cond.wait_for(lambda: bot._dashboard_update_seq != seq, timeout=15)
                             seq = bot._dashboard_update_seq
                         payload = json.dumps(bot._dashboard_stream_snapshot(), separators=(",", ":"))
-                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                        self.wfile.flush()
+                        try:
+                            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                            self.wfile.flush()
+                        except BrokenPipeError:
+                            break
+                        except ConnectionResetError:
+                            break
                     return
 
                 if bot.config.prometheus_enabled and parsed.path == bot.config.prometheus_path:
@@ -2385,10 +2440,25 @@ class GridStrategy(StrategyEngine):
                 self.wfile.write(html)
 
             def do_POST(self) -> None:  # noqa: N802
+                if not bot._is_dashboard_request_authorized(self.headers):
+                    self.send_error(HTTPStatus.UNAUTHORIZED, "Unauthorized")
+                    return
+
                 if self.path != "/api/action":
                     self.send_error(HTTPStatus.NOT_FOUND, "Not found")
                     return
-                length = int(self.headers.get("Content-Length", "0"))
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
+                    return
+                if length < 0:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
+                    return
+                if length > bot.config.dashboard_max_request_bytes:
+                    self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Request body too large")
+                    return
+
                 raw = self.rfile.read(length) if length > 0 else b"{}"
                 try:
                     payload = json.loads(raw.decode("utf-8"))
@@ -2397,7 +2467,10 @@ class GridStrategy(StrategyEngine):
                     return
 
                 action = str(payload.get("action", "")).strip().lower()
-                result = bot._handle_dashboard_action(action=action, payload=payload)
+                try:
+                    result = bot._handle_dashboard_action(action=action, payload=payload)
+                except ValueError as exc:
+                    result = {"ok": False, "error": str(exc)}
                 body = json.dumps(result, indent=2).encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2621,10 +2694,11 @@ class GridStrategy(StrategyEngine):
             return {"ok": True, "action": action, "applied": applied}
         if action == "save_config":
             updates = payload.get("updates", {})
-            env_path = str(payload.get("env_path", os.getenv("BOT_ENV_PATH", ".env"))).strip() or ".env"
-            saved = self._save_config_updates(Path(env_path), updates)
+            requested = str(payload.get("env_path", os.getenv("BOT_ENV_PATH", ".env")))
+            env_path = self._resolve_env_path(requested)
+            saved = self._save_config_updates(env_path, updates)
             self._add_event(f"Config file updated: {','.join(saved)}")
-            return {"ok": True, "action": action, "saved": saved, "env_path": env_path}
+            return {"ok": True, "action": action, "saved": saved, "env_path": str(env_path)}
         return {"ok": False, "error": f"unsupported action {action}"}
 
     def _apply_runtime_config_updates(self, updates: Dict[str, Any]) -> List[str]:
@@ -2634,7 +2708,10 @@ class GridStrategy(StrategyEngine):
             field = field_map.get(env_name)
             if field is None:
                 continue
-            parsed = self._parse_config_value(str(raw), field["type"])
+            raw_text = str(raw)
+            if self._is_sensitive_config_field(env_name) and raw_text.strip() == MASKED_SECRET_PLACEHOLDER:
+                continue
+            parsed = self._parse_config_value(raw_text, field["type"])
             setattr(self.config, field["attr"], parsed)
             applied.append(env_name)
         _validate_config(self.config)
@@ -2649,7 +2726,10 @@ class GridStrategy(StrategyEngine):
             field = field_map.get(env_name)
             if field is None:
                 continue
-            parsed = self._parse_config_value(str(raw), field["type"])
+            raw_text = str(raw)
+            if self._is_sensitive_config_field(env_name) and raw_text.strip() == MASKED_SECRET_PLACEHOLDER:
+                continue
+            parsed = self._parse_config_value(raw_text, field["type"])
             setattr(self.config, field["attr"], parsed)
             normalized[env_name] = str(parsed).lower() if field["type"] == "bool" else str(parsed)
 
@@ -2675,7 +2755,12 @@ class GridStrategy(StrategyEngine):
         for key in sorted(normalized.keys() - consumed):
             output_lines.append(f"{key}={normalized[key]}")
 
+        env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text("\n".join(output_lines).rstrip() + "\n")
+        try:
+            os.chmod(env_path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
         return sorted(normalized.keys())
 
     def _init_db(self) -> None:
@@ -3296,6 +3381,8 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("INVENTORY_CAP_MAX_PCT must be in (0,1]")
     if config.dashboard_port <= 0:
         raise ValueError("DASHBOARD_PORT must be > 0")
+    if config.dashboard_max_request_bytes <= 0:
+        raise ValueError("DASHBOARD_MAX_REQUEST_BYTES must be > 0")
     if config.paper_start_usd < 0 or config.paper_start_btc < 0 or config.paper_start_base < 0:
         raise ValueError("PAPER_START_USD, PAPER_START_BTC, and PAPER_START_BASE must be >= 0")
     if config.trailing_trigger_levels < 1:
