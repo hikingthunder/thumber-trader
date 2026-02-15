@@ -72,6 +72,15 @@ class BotConfig:
     alpha_weight_macd: Decimal = Decimal(os.getenv("ALPHA_WEIGHT_MACD", "0.3"))
     alpha_weight_imbalance: Decimal = Decimal(os.getenv("ALPHA_WEIGHT_IMBALANCE", "0.4"))
 
+    # order-flow toxicity (VPIN)
+    vpin_enabled: bool = os.getenv("VPIN_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    vpin_bucket_volume_base: Decimal = Decimal(os.getenv("VPIN_BUCKET_VOLUME_BASE", "0.25"))
+    vpin_rolling_buckets: int = int(os.getenv("VPIN_ROLLING_BUCKETS", "50"))
+    vpin_history_size: int = int(os.getenv("VPIN_HISTORY_SIZE", "300"))
+    vpin_threshold_percentile: Decimal = Decimal(os.getenv("VPIN_THRESHOLD_PERCENTILE", "0.95"))
+    vpin_response_mode: str = os.getenv("VPIN_RESPONSE_MODE", "widen").strip().lower()
+    vpin_widen_band_multiplier: Decimal = Decimal(os.getenv("VPIN_WIDEN_BAND_MULTIPLIER", "1.5"))
+
     # live fee adaptation
     dynamic_fee_tracking_enabled: bool = os.getenv("DYNAMIC_FEE_TRACKING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     fee_refresh_seconds: int = int(os.getenv("FEE_REFRESH_SECONDS", "3600"))
@@ -363,7 +372,18 @@ class GridStrategy(StrategyEngine):
         self._emergency_stop_triggered = False
         self._last_consensus_components: Dict[str, str] = {}
         self._alpha_confidence_scores: Dict[int, Decimal] = {}
-        self._alpha_signal_snapshot: Dict[str, str] = {"rsi": "0", "macd_hist": "0", "book_imbalance": "0"}
+        self._alpha_signal_snapshot: Dict[str, str] = {"rsi": "0", "macd_hist": "0", "book_imbalance": "0", "vpin": "0"}
+        self._vpin_bucket_fill = Decimal("0")
+        self._vpin_bucket_buy = Decimal("0")
+        self._vpin_bucket_sell = Decimal("0")
+        self._vpin_bucket_imbalances: collections.deque[Decimal] = collections.deque(maxlen=max(5, self.config.vpin_history_size))
+        self._vpin_history: collections.deque[Decimal] = collections.deque(maxlen=max(20, self.config.vpin_history_size))
+        self._vpin_last_trade_id: Optional[str] = None
+        self._vpin_value = Decimal("0")
+        self._vpin_threshold = Decimal("0")
+        self._vpin_toxic_flow = False
+        self._vpin_pause_entries = False
+        self._vpin_band_multiplier = Decimal("1")
         self._dashboard_candles: List[Dict[str, float]] = []
         self._dashboard_candles_refresh_ts = 0.0
         self._dashboard_recent_fills: List[Dict[str, str]] = self._load_recent_fills_for_dashboard(limit=40)
@@ -414,6 +434,7 @@ class GridStrategy(StrategyEngine):
                 current_price = await asyncio.to_thread(self._get_current_price)
                 await asyncio.to_thread(self._refresh_maker_fee)
                 trend_bias = await asyncio.to_thread(self._get_trend_bias)
+                await asyncio.to_thread(self._refresh_vpin_signal)
                 await asyncio.to_thread(self._refresh_alpha_confidence, current_price)
                 with self._state_lock:
                     self.loop_count += 1
@@ -768,16 +789,16 @@ class GridStrategy(StrategyEngine):
     def _effective_grid_band_pct(self, current_price: Decimal) -> Decimal:
         regime_band_multiplier = self._regime_band_multiplier()
         if not self.config.atr_enabled:
-            return self.config.grid_band_pct * regime_band_multiplier
+            return self.config.grid_band_pct * regime_band_multiplier * self._vpin_band_multiplier
 
         candles = self._fetch_public_candles()
         atr = _atr(candles, self.config.atr_period)
         if atr <= 0:
-            return self.config.grid_band_pct * regime_band_multiplier
+            return self.config.grid_band_pct * regime_band_multiplier * self._vpin_band_multiplier
 
         dynamic_pct = (atr * self.config.atr_band_multiplier) / current_price
         atr_band = max(self.config.atr_min_band_pct, min(dynamic_pct, self.config.atr_max_band_pct))
-        return atr_band * regime_band_multiplier
+        return atr_band * regime_band_multiplier * self._vpin_band_multiplier
 
     def _place_initial_grid_orders(self, current_price: Decimal) -> None:
         trend_bias = self._get_trend_bias()
@@ -925,6 +946,9 @@ class GridStrategy(StrategyEngine):
 
         price = self._q_price(price)
         if side == "BUY":
+            if self._vpin_pause_entries:
+                logging.warning("Skipped BUY at %s because VPIN toxicity gate is active.", price)
+                return None
             if self._buy_safe_mode_active():
                 logging.warning("Skipped BUY at %s because safe mode is active.", price)
                 return None
@@ -945,6 +969,9 @@ class GridStrategy(StrategyEngine):
                     logging.warning("Skipped BUY at %s in paper mode; insufficient USD.", price)
                     return None
         elif side == "SELL":
+            if self._vpin_pause_entries:
+                logging.warning("Skipped SELL at %s because VPIN toxicity gate is active.", price)
+                return None
             if base_size is None:
                 raise ValueError("base_size is required for SELL")
             base_size = self._q_base(base_size)
@@ -1345,6 +1372,7 @@ class GridStrategy(StrategyEngine):
             "rsi": str(rsi),
             "macd_hist": str(macd_hist),
             "book_imbalance": str(imbalance),
+            "vpin": str(self._vpin_value),
         }
 
         w_rsi = self.config.alpha_weight_rsi
@@ -1377,6 +1405,92 @@ class GridStrategy(StrategyEngine):
 
     def _confidence_order_multiplier(self, confidence: Decimal) -> Decimal:
         return Decimal("0.5") + max(Decimal("0"), min(Decimal("1"), confidence))
+
+    def _refresh_vpin_signal(self) -> None:
+        if not self.config.vpin_enabled:
+            self._vpin_toxic_flow = False
+            self._vpin_pause_entries = False
+            self._vpin_band_multiplier = Decimal("1")
+            return
+
+        trades = self._fetch_recent_trades()
+        if not trades:
+            return
+
+        bucket_size = max(Decimal("0.00000001"), self.config.vpin_bucket_volume_base)
+        new_trade_seen = False
+        for trade_id, side, size in trades:
+            if self._vpin_last_trade_id is not None and trade_id <= self._vpin_last_trade_id:
+                continue
+            new_trade_seen = True
+            remaining = size
+            while remaining > 0:
+                room = bucket_size - self._vpin_bucket_fill
+                chunk = remaining if remaining <= room else room
+                if side == "buy":
+                    self._vpin_bucket_buy += chunk
+                else:
+                    self._vpin_bucket_sell += chunk
+                self._vpin_bucket_fill += chunk
+                remaining -= chunk
+                if self._vpin_bucket_fill >= bucket_size:
+                    imbalance = abs(self._vpin_bucket_buy - self._vpin_bucket_sell) / bucket_size
+                    self._vpin_bucket_imbalances.append(imbalance)
+                    self._vpin_bucket_fill = Decimal("0")
+                    self._vpin_bucket_buy = Decimal("0")
+                    self._vpin_bucket_sell = Decimal("0")
+            self._vpin_last_trade_id = trade_id
+
+        if not new_trade_seen or len(self._vpin_bucket_imbalances) < max(5, self.config.vpin_rolling_buckets // 2):
+            return
+
+        window = list(self._vpin_bucket_imbalances)[-self.config.vpin_rolling_buckets :]
+        self._vpin_value = sum(window, Decimal("0")) / Decimal(len(window))
+        self._vpin_history.append(self._vpin_value)
+        self._vpin_threshold = _decimal_percentile(list(self._vpin_history), self.config.vpin_threshold_percentile)
+        toxic_flow = len(self._vpin_history) >= 20 and self._vpin_value >= self._vpin_threshold > 0
+        self._set_vpin_controls(toxic_flow)
+
+    def _set_vpin_controls(self, toxic_flow: bool) -> None:
+        mode = self.config.vpin_response_mode
+        pause_entries = toxic_flow and mode in {"pause", "pause_entries", "both"}
+        band_multiplier = self.config.vpin_widen_band_multiplier if toxic_flow and mode in {"widen", "both"} else Decimal("1")
+        band_multiplier = max(Decimal("1"), band_multiplier)
+
+        state_changed = toxic_flow != self._vpin_toxic_flow or pause_entries != self._vpin_pause_entries or band_multiplier != self._vpin_band_multiplier
+        self._vpin_toxic_flow = toxic_flow
+        self._vpin_pause_entries = pause_entries
+        self._vpin_band_multiplier = band_multiplier
+        if state_changed:
+            action = f"band x{self._vpin_band_multiplier}" if self._vpin_toxic_flow else "normal mode"
+            if self._vpin_pause_entries:
+                action += ", entry pause"
+            self._add_event(f"VPIN state changed: toxic={self._vpin_toxic_flow}, {action}")
+
+    def _fetch_recent_trades(self) -> List[Tuple[str, str, Decimal]]:
+        url = f"https://api.exchange.coinbase.com/products/{self.config.product_id}/trades"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "thumber-trader/1.0"})
+            with self._coinbase_api_call("public_trades", urllib.request.urlopen, req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return []
+
+        rows: List[Tuple[str, str, Decimal]] = []
+        for trade in reversed(payload if isinstance(payload, list) else []):
+            trade_id = str(trade.get("trade_id") or "")
+            side = str(trade.get("side") or "").lower()
+            size_raw = trade.get("size")
+            if not trade_id or side not in {"buy", "sell"} or size_raw is None:
+                continue
+            try:
+                size = Decimal(str(size_raw))
+            except Exception:
+                continue
+            if size <= 0:
+                continue
+            rows.append((trade_id, side, size))
+        return rows
 
     def _fetch_public_candles(self) -> List[Tuple[int, Decimal, Decimal, Decimal]]:
         params = urllib.parse.urlencode(
@@ -1880,6 +1994,13 @@ class GridStrategy(StrategyEngine):
                 "consensus_components": dict(self._last_consensus_components),
                 "alpha_confidence_scores": {str(k): str(v) for k, v in self._alpha_confidence_scores.items()},
                 "alpha_signals": dict(self._alpha_signal_snapshot),
+                "vpin": {
+                    "value": str(self._vpin_value),
+                    "threshold": str(self._vpin_threshold),
+                    "toxic_flow": self._vpin_toxic_flow,
+                    "pause_entries": self._vpin_pause_entries,
+                    "band_multiplier": str(self._vpin_band_multiplier),
+                },
                 "ranging_score": str(self.ranging_score()),
                 "maker_fee_pct": str(self._effective_maker_fee_pct),
                 "daily_realized_pnl_usd": str(self._daily_realized_pnl),
@@ -2234,6 +2355,12 @@ class GridStrategy(StrategyEngine):
                 "# HELP bot_sentiment_score_1h One-hour rolling sentiment score.",
                 "# TYPE bot_sentiment_score_1h gauge",
                 f"bot_sentiment_score_1h{{{labels}}} {self._last_sentiment_report.get('score_1h', '0')}",
+                "# HELP bot_vpin Volume-synchronized probability of informed trading.",
+                "# TYPE bot_vpin gauge",
+                f"bot_vpin{{{labels}}} {float(self._vpin_value)}",
+                "# HELP bot_vpin_toxic_flow Whether VPIN toxicity regime is active (1=active).",
+                "# TYPE bot_vpin_toxic_flow gauge",
+                f"bot_vpin_toxic_flow{{{labels}}} {1 if self._vpin_toxic_flow else 0}",
             ]
 
             cumulative = 0
@@ -2990,6 +3117,18 @@ def _beta(asset_returns: List[Decimal], benchmark_returns: List[Decimal]) -> Dec
     if var_x <= 0:
         return Decimal("0")
     return cov / var_x
+
+
+def _decimal_percentile(values: List[Decimal], percentile: Decimal) -> Decimal:
+    if not values:
+        return Decimal("0")
+    pct = max(Decimal("0"), min(Decimal("1"), percentile))
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    idx = int((len(ordered) - 1) * float(pct))
+    idx = max(0, min(len(ordered) - 1, idx))
+    return ordered[idx]
 
 
 def _as_dict(response: Any) -> Dict[str, Any]:

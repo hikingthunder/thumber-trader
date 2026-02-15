@@ -18,6 +18,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Uses Coinbase `WSUserClient` for low-latency fill notifications and immediate replacement orders.
 - Supports multi-source consensus pricing by blending mid-prices from Coinbase/Binance/Kraken/Bybit (configurable + outlier filtering).
 - Computes an alpha fusion confidence score per grid level by combining RSI, MACD histogram, and order book imbalance.
+- Detects order-flow toxicity with VPIN (volume-time buckets), then auto-widens grid bands or pauses entries when VPIN breaches its rolling 95th-percentile threshold.
 - Tracks Coinbase WebSocket sequence numbers; on any gap, automatically triggers REST `get_orders` reconciliation so local SQLite state recovers before normal execution resumes.
 - Keeps periodic polling (60s default) as a resilience backstop and market-data refresh path.
 - Supports optional exchange-side attached bracket exits for BUY entries.
@@ -117,6 +118,15 @@ ALPHA_MACD_SIGNAL=9
 ALPHA_WEIGHT_RSI=0.3
 ALPHA_WEIGHT_MACD=0.3
 ALPHA_WEIGHT_IMBALANCE=0.4
+
+# VPIN toxicity detection (widen|pause|both)
+VPIN_ENABLED=true
+VPIN_BUCKET_VOLUME_BASE=0.25
+VPIN_ROLLING_BUCKETS=50
+VPIN_HISTORY_SIZE=300
+VPIN_THRESHOLD_PERCENTILE=0.95
+VPIN_RESPONSE_MODE=widen
+VPIN_WIDEN_BAND_MULTIPLIER=1.5
 
 DYNAMIC_FEE_TRACKING_ENABLED=true
 FEE_REFRESH_SECONDS=3600
