@@ -57,6 +57,21 @@ class BotConfig:
     target_net_profit_pct: Decimal = Decimal(os.getenv("TARGET_NET_PROFIT_PCT", "0.002"))
     poll_seconds: int = int(os.getenv("POLL_SECONDS", "60"))
 
+    # multi-venue market data
+    consensus_pricing_enabled: bool = os.getenv("CONSENSUS_PRICING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    consensus_exchanges: str = os.getenv("CONSENSUS_EXCHANGES", "coinbase,binance,kraken,bybit")
+    consensus_max_deviation_pct: Decimal = Decimal(os.getenv("CONSENSUS_MAX_DEVIATION_PCT", "0.02"))
+
+    # alpha fusion
+    alpha_fusion_enabled: bool = os.getenv("ALPHA_FUSION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    alpha_rsi_period: int = int(os.getenv("ALPHA_RSI_PERIOD", "14"))
+    alpha_macd_fast: int = int(os.getenv("ALPHA_MACD_FAST", "12"))
+    alpha_macd_slow: int = int(os.getenv("ALPHA_MACD_SLOW", "26"))
+    alpha_macd_signal: int = int(os.getenv("ALPHA_MACD_SIGNAL", "9"))
+    alpha_weight_rsi: Decimal = Decimal(os.getenv("ALPHA_WEIGHT_RSI", "0.3"))
+    alpha_weight_macd: Decimal = Decimal(os.getenv("ALPHA_WEIGHT_MACD", "0.3"))
+    alpha_weight_imbalance: Decimal = Decimal(os.getenv("ALPHA_WEIGHT_IMBALANCE", "0.4"))
+
     # live fee adaptation
     dynamic_fee_tracking_enabled: bool = os.getenv("DYNAMIC_FEE_TRACKING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     fee_refresh_seconds: int = int(os.getenv("FEE_REFRESH_SECONDS", "3600"))
@@ -302,6 +317,9 @@ class GridBot:
             "healthy": True,
         }
         self._emergency_stop_triggered = False
+        self._last_consensus_components: Dict[str, str] = {}
+        self._alpha_confidence_scores: Dict[int, Decimal] = {}
+        self._alpha_signal_snapshot: Dict[str, str] = {"rsi": "0", "macd_hist": "0", "book_imbalance": "0"}
         self._migrate_orders_json_if_needed()
 
     async def run(self) -> None:
@@ -347,6 +365,7 @@ class GridBot:
                 current_price = await asyncio.to_thread(self._get_current_price)
                 await asyncio.to_thread(self._refresh_maker_fee)
                 trend_bias = await asyncio.to_thread(self._get_trend_bias)
+                await asyncio.to_thread(self._refresh_alpha_confidence, current_price)
                 with self._state_lock:
                     self.loop_count += 1
                     self.last_price = current_price
@@ -422,11 +441,85 @@ class GridBot:
         logging.info("Metadata: quote_increment=%s base_increment=%s", self.price_increment, self.base_increment)
 
     def _get_current_price(self) -> Decimal:
+        if self.config.consensus_pricing_enabled:
+            consensus = self._get_consensus_price()
+            if consensus is not None:
+                return consensus
         product = _as_dict(self._coinbase_api_call("get_product", self.client.get_product, product_id=self.config.product_id))
         raw = product.get("price")
         if raw is None:
             raise RuntimeError(f"Unable to read product price: {product}")
         return Decimal(str(raw))
+
+    def _get_consensus_price(self) -> Optional[Decimal]:
+        mids = self._fetch_exchange_mid_prices()
+        if not mids:
+            return None
+
+        values = list(mids.values())
+        pivot = sorted(values)[len(values) // 2]
+        allowed = max(Decimal("0"), self.config.consensus_max_deviation_pct)
+        filtered = [v for v in values if pivot > 0 and abs(v - pivot) / pivot <= allowed]
+        if not filtered:
+            filtered = values
+        self._last_consensus_components = {name: str(price) for name, price in mids.items()}
+        return sum(filtered, Decimal("0")) / Decimal(len(filtered))
+
+    def _fetch_exchange_mid_prices(self) -> Dict[str, Decimal]:
+        exchange_names = [part.strip().lower() for part in self.config.consensus_exchanges.split(",") if part.strip()]
+        mids: Dict[str, Decimal] = {}
+        for venue in exchange_names:
+            try:
+                mid = self._fetch_venue_mid_price(venue)
+                if mid is not None and mid > 0:
+                    mids[venue] = mid
+            except Exception as exc:
+                logging.debug("Consensus pricing venue %s unavailable: %s", venue, exc)
+        return mids
+
+    def _fetch_venue_mid_price(self, venue: str) -> Optional[Decimal]:
+        base, quote = self.config.product_id.split("-")
+        if venue == "coinbase":
+            url = f"https://api.exchange.coinbase.com/products/{base}-{quote}/ticker"
+            with self._coinbase_api_call("public_ticker_coinbase", urllib.request.urlopen, url, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            bid = Decimal(str(payload.get("bid") or "0"))
+            ask = Decimal(str(payload.get("ask") or "0"))
+            return (bid + ask) / Decimal("2") if bid > 0 and ask > 0 else None
+        if venue == "binance":
+            symbol = f"{base}USDT" if quote == "USD" else f"{base}{quote}"
+            url = f"https://api.binance.com/api/v3/ticker/bookTicker?symbol={symbol}"
+            with urllib.request.urlopen(url, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            bid = Decimal(str(payload.get("bidPrice") or "0"))
+            ask = Decimal(str(payload.get("askPrice") or "0"))
+            return (bid + ask) / Decimal("2") if bid > 0 and ask > 0 else None
+        if venue == "kraken":
+            kraken_base = "XBT" if base == "BTC" else base
+            pair = f"{kraken_base}{quote}"
+            url = f"https://api.kraken.com/0/public/Ticker?pair={pair}"
+            with urllib.request.urlopen(url, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            result = payload.get("result", {})
+            if not result:
+                return None
+            ticker = next(iter(result.values()))
+            bid = Decimal(str((ticker.get("b") or ["0"])[0]))
+            ask = Decimal(str((ticker.get("a") or ["0"])[0]))
+            return (bid + ask) / Decimal("2") if bid > 0 and ask > 0 else None
+        if venue == "bybit":
+            symbol = f"{base}USDT" if quote == "USD" else f"{base}{quote}"
+            url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}"
+            with urllib.request.urlopen(url, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            rows = payload.get("result", {}).get("list", [])
+            if not rows:
+                return None
+            row = rows[0]
+            bid = Decimal(str(row.get("bid1Price") or "0"))
+            ask = Decimal(str(row.get("ask1Price") or "0"))
+            return (bid + ask) / Decimal("2") if bid > 0 and ask > 0 else None
+        return None
 
     def _build_ws_user_client(self) -> Optional[Any]:
         try:
@@ -650,14 +743,20 @@ class GridBot:
         buy_levels = buy_levels[:max_buys] if max_buys >= 0 else []
 
         for level in buy_levels:
-            self._place_grid_order(side="BUY", price=level, usd_notional=buy_budget_per_order)
+            confidence = self._confidence_for_price(level)
+            self._place_grid_order(
+                side="BUY",
+                price=level,
+                usd_notional=buy_budget_per_order * self._confidence_order_multiplier(confidence),
+            )
 
         if sell_levels and base_available > Decimal("0"):
             base_per_sell = self._q_base(base_available / Decimal(len(sell_levels)))
             for level in sell_levels:
-                if base_per_sell * level < self.config.min_notional_usd:
+                scaled = self._q_base(base_per_sell * self._confidence_order_multiplier(self._confidence_for_price(level)))
+                if scaled * level < self.config.min_notional_usd:
                     continue
-                self._place_grid_order(side="SELL", price=level, base_size=base_per_sell)
+                self._place_grid_order(side="SELL", price=level, base_size=scaled)
 
         logging.info("Initial grid placed with trend bias=%s (buys=%s sells=%s).", trend_bias, len(buy_levels), len(sell_levels))
 
@@ -684,7 +783,8 @@ class GridBot:
                     logging.info("Buy filled at %s; downtrend active, delaying replacement sell check.", fill_price)
                 new_price = self.grid_levels[grid_index + 1]
                 base_size = self._q_base(Decimal(str(record["base_size"])))
-                new_id = self._place_grid_order(side="SELL", price=new_price, base_size=base_size, grid_index=grid_index + 1)
+                scaled_base = self._q_base(base_size * self._confidence_order_multiplier(self._confidence_for_price(new_price)))
+                new_id = self._place_grid_order(side="SELL", price=new_price, base_size=scaled_base, grid_index=grid_index + 1)
                 if new_id:
                     logging.info("Buy Filled at $%s! Placed Sell at $%s.", fill_price, new_price)
                     self._add_event(f"Replacement SELL placed @ {new_price}")
@@ -695,7 +795,13 @@ class GridBot:
                     continue
                 new_price = self.grid_levels[grid_index - 1]
                 usd_notional = self._regime_adjusted_buy_notional(Decimal(str(record["base_size"])) * fill_price)
-                new_id = self._place_grid_order(side="BUY", price=new_price, usd_notional=usd_notional, grid_index=grid_index - 1)
+                confidence = self._confidence_for_price(new_price)
+                new_id = self._place_grid_order(
+                    side="BUY",
+                    price=new_price,
+                    usd_notional=usd_notional * self._confidence_order_multiplier(confidence),
+                    grid_index=grid_index - 1,
+                )
                 if new_id:
                     logging.info("Sell Filled at $%s! Placed Buy at $%s.", fill_price, new_price)
                     self._add_event(f"Replacement BUY placed @ {new_price}")
@@ -1094,6 +1200,113 @@ class GridBot:
         parsed.sort(key=lambda x: x[0])
         return parsed
 
+    def _fetch_level2_bids(self) -> List[Tuple[Decimal, Decimal]]:
+        limit = max(1, self.config.liquidity_depth_levels)
+        endpoints = [
+            f"https://api.coinbase.com/api/v3/brokerage/product_book?product_id={self.config.product_id}&limit={limit}",
+            f"https://api.exchange.coinbase.com/products/{self.config.product_id}/book?level=2",
+        ]
+        for url in endpoints:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "thumber-trader/1.0"})
+                with self._coinbase_api_call("public_level2", urllib.request.urlopen, req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                continue
+
+            bids = self._parse_level2_bids(payload)
+            if bids:
+                return bids
+        return []
+
+    def _parse_level2_bids(self, payload: Dict[str, Any]) -> List[Tuple[Decimal, Decimal]]:
+        raw_bids = payload.get("pricebook", {}).get("bids")
+        if raw_bids is None:
+            raw_bids = payload.get("bids", [])
+
+        parsed: List[Tuple[Decimal, Decimal]] = []
+        for level in raw_bids or []:
+            if isinstance(level, dict):
+                price_raw = level.get("price")
+                size_raw = level.get("size") or level.get("quantity")
+            elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                price_raw = level[0]
+                size_raw = level[1]
+            else:
+                continue
+
+            if price_raw is None or size_raw is None:
+                continue
+            try:
+                price = Decimal(str(price_raw))
+                size = Decimal(str(size_raw))
+            except Exception:
+                continue
+            if price <= 0 or size <= 0:
+                continue
+            parsed.append((price, size))
+
+        parsed.sort(key=lambda x: x[0], reverse=True)
+        return parsed
+
+    def _book_imbalance(self) -> Decimal:
+        asks = self._fetch_level2_asks()
+        bids = self._fetch_level2_bids()
+        top = max(1, min(10, self.config.liquidity_depth_levels))
+        ask_size = sum((size for _price, size in asks[:top]), Decimal("0"))
+        bid_size = sum((size for _price, size in bids[:top]), Decimal("0"))
+        denom = ask_size + bid_size
+        if denom <= 0:
+            return Decimal("0")
+        return (bid_size - ask_size) / denom
+
+    def _refresh_alpha_confidence(self, current_price: Decimal) -> None:
+        if not self.config.alpha_fusion_enabled or not self.grid_levels:
+            self._alpha_confidence_scores = {}
+            return
+
+        candles = self._fetch_public_candles()
+        closes = [c[3] for c in candles]
+        rsi = _rsi(closes, self.config.alpha_rsi_period)
+        macd_hist = _macd_histogram(closes, self.config.alpha_macd_fast, self.config.alpha_macd_slow, self.config.alpha_macd_signal)
+        imbalance = self._book_imbalance()
+        self._alpha_signal_snapshot = {
+            "rsi": str(rsi),
+            "macd_hist": str(macd_hist),
+            "book_imbalance": str(imbalance),
+        }
+
+        w_rsi = self.config.alpha_weight_rsi
+        w_macd = self.config.alpha_weight_macd
+        w_imb = self.config.alpha_weight_imbalance
+        denom = w_rsi + w_macd + w_imb
+        if denom <= 0:
+            denom = Decimal("1")
+
+        rsi_component = (rsi - Decimal("50")) / Decimal("50")
+        price_ref = current_price if current_price > 0 else (closes[-1] if closes else Decimal("0"))
+        macd_component = Decimal("0") if price_ref <= 0 else max(Decimal("-1"), min(Decimal("1"), macd_hist / (price_ref * Decimal("0.01"))))
+
+        scores: Dict[int, Decimal] = {}
+        for idx, level in enumerate(self.grid_levels):
+            side_sign = Decimal("1") if level >= current_price else Decimal("-1")
+            fused = ((rsi_component * w_rsi) + (macd_component * w_macd) + (imbalance * side_sign * w_imb)) / denom
+            confidence = max(Decimal("0"), min(Decimal("1"), (fused + Decimal("1")) / Decimal("2")))
+            scores[idx] = confidence
+        self._alpha_confidence_scores = scores
+
+    def _confidence_for_price(self, price: Decimal) -> Decimal:
+        if not self._alpha_confidence_scores or not self.grid_levels:
+            return Decimal("0.5")
+        try:
+            idx = self.grid_levels.index(price)
+        except ValueError:
+            idx = min(range(len(self.grid_levels)), key=lambda i: abs(self.grid_levels[i] - price))
+        return self._alpha_confidence_scores.get(idx, Decimal("0.5"))
+
+    def _confidence_order_multiplier(self, confidence: Decimal) -> Decimal:
+        return Decimal("0.5") + max(Decimal("0"), min(Decimal("1"), confidence))
+
     def _fetch_public_candles(self) -> List[Tuple[int, Decimal, Decimal, Decimal]]:
         params = urllib.parse.urlencode(
             {
@@ -1426,6 +1639,9 @@ class GridBot:
                 "market_regime_source": self._market_regime_source,
                 "market_regime_confidence": str(self._market_regime_confidence),
                 "atr_pct": str(self._cached_atr_pct),
+                "consensus_components": dict(self._last_consensus_components),
+                "alpha_confidence_scores": {str(k): str(v) for k, v in self._alpha_confidence_scores.items()},
+                "alpha_signals": dict(self._alpha_signal_snapshot),
                 "ranging_score": str(self.ranging_score()),
                 "maker_fee_pct": str(self._effective_maker_fee_pct),
                 "daily_realized_pnl_usd": str(self._daily_realized_pnl),
@@ -2191,6 +2407,46 @@ def _ema(values: List[Decimal], period: int) -> Decimal:
         ema_val = (v * alpha) + (ema_val * (Decimal("1") - alpha))
     return ema_val
 
+
+def _rsi(values: List[Decimal], period: int) -> Decimal:
+    if period <= 0 or len(values) < period + 1:
+        return Decimal("50")
+
+    gains: List[Decimal] = []
+    losses: List[Decimal] = []
+    for prev, cur in zip(values, values[1:]):
+        delta = cur - prev
+        gains.append(max(Decimal("0"), delta))
+        losses.append(max(Decimal("0"), -delta))
+
+    avg_gain = sum(gains[-period:], Decimal("0")) / Decimal(period)
+    avg_loss = sum(losses[-period:], Decimal("0")) / Decimal(period)
+    if avg_loss <= 0:
+        return Decimal("100") if avg_gain > 0 else Decimal("50")
+    rs = avg_gain / avg_loss
+    return Decimal("100") - (Decimal("100") / (Decimal("1") + rs))
+
+
+def _macd_histogram(values: List[Decimal], fast: int, slow: int, signal: int) -> Decimal:
+    if len(values) < max(fast, slow) + signal:
+        return Decimal("0")
+
+    alpha_fast = Decimal("2") / Decimal(fast + 1)
+    alpha_slow = Decimal("2") / Decimal(slow + 1)
+    alpha_signal = Decimal("2") / Decimal(signal + 1)
+
+    fast_ema = values[0]
+    slow_ema = values[0]
+    macd_series: List[Decimal] = []
+    for val in values:
+        fast_ema = (val * alpha_fast) + (fast_ema * (Decimal("1") - alpha_fast))
+        slow_ema = (val * alpha_slow) + (slow_ema * (Decimal("1") - alpha_slow))
+        macd_series.append(fast_ema - slow_ema)
+
+    signal_ema = macd_series[0]
+    for m in macd_series[1:]:
+        signal_ema = (m * alpha_signal) + (signal_ema * (Decimal("1") - alpha_signal))
+    return macd_series[-1] - signal_ema
 
 
 def _atr(candles: List[Tuple[int, Decimal, Decimal, Decimal]], period: int) -> Decimal:
