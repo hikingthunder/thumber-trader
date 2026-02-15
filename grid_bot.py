@@ -434,6 +434,16 @@ class GridStrategy(StrategyEngine):
         self._last_consensus_components: Dict[str, str] = {}
         self._alpha_confidence_scores: Dict[int, Decimal] = {}
         self._alpha_signal_snapshot: Dict[str, str] = {"rsi": "0", "macd_hist": "0", "book_imbalance": "0", "vpin": "0"}
+        self._alpha_component_snapshot: Dict[str, Decimal] = {
+            "rsi": Decimal("0"),
+            "macd": Decimal("0"),
+            "book_imbalance": Decimal("0"),
+        }
+        self._alpha_realized_attribution: Dict[str, Decimal] = {
+            "rsi": Decimal("0"),
+            "macd": Decimal("0"),
+            "book_imbalance": Decimal("0"),
+        }
         self._vpin_bucket_fill = Decimal("0")
         self._vpin_bucket_buy = Decimal("0")
         self._vpin_bucket_sell = Decimal("0")
@@ -1449,6 +1459,11 @@ class GridStrategy(StrategyEngine):
         rsi_component = (rsi - Decimal("50")) / Decimal("50")
         price_ref = current_price if current_price > 0 else (closes[-1] if closes else Decimal("0"))
         macd_component = Decimal("0") if price_ref <= 0 else max(Decimal("-1"), min(Decimal("1"), macd_hist / (price_ref * Decimal("0.01"))))
+        self._alpha_component_snapshot = {
+            "rsi": rsi_component,
+            "macd": macd_component,
+            "book_imbalance": imbalance,
+        }
 
         scores: Dict[int, Decimal] = {}
         for idx, level in enumerate(self.grid_levels):
@@ -1469,6 +1484,49 @@ class GridStrategy(StrategyEngine):
 
     def _confidence_order_multiplier(self, confidence: Decimal) -> Decimal:
         return Decimal("0.5") + max(Decimal("0"), min(Decimal("1"), confidence))
+
+    def _record_alpha_realized_attribution(self, realized_pnl_usd: Decimal) -> None:
+        if realized_pnl_usd == 0:
+            return
+        components = self._alpha_component_snapshot
+        denom = sum((abs(value) for value in components.values()), Decimal("0"))
+        if denom <= 0:
+            return
+        for name, value in components.items():
+            weight = abs(value) / denom
+            aligned = (realized_pnl_usd >= 0 and value >= 0) or (realized_pnl_usd < 0 and value < 0)
+            signed_alignment = Decimal("1") if aligned else Decimal("-1")
+            self._alpha_realized_attribution[name] += realized_pnl_usd * weight * signed_alignment
+
+    def _rebalance_alpha_weights_from_attribution(self) -> None:
+        current_weights = {
+            "rsi": self.config.alpha_weight_rsi,
+            "macd": self.config.alpha_weight_macd,
+            "book_imbalance": self.config.alpha_weight_imbalance,
+        }
+        positive_scores = {k: max(Decimal("0"), v) for k, v in self._alpha_realized_attribution.items()}
+        positive_total = sum(positive_scores.values(), Decimal("0"))
+        if positive_total <= 0:
+            return
+
+        learning_rate = Decimal("0.2")
+        total_current = sum(current_weights.values(), Decimal("0"))
+        if total_current <= 0:
+            total_current = Decimal("1")
+
+        updated: Dict[str, Decimal] = {}
+        for key, current in current_weights.items():
+            current_norm = current / total_current
+            target = positive_scores[key] / positive_total
+            blended = (current_norm * (Decimal("1") - learning_rate)) + (target * learning_rate)
+            updated[key] = max(Decimal("0.05"), blended)
+
+        updated_total = sum(updated.values(), Decimal("0"))
+        if updated_total <= 0:
+            return
+        self.config.alpha_weight_rsi = updated["rsi"] / updated_total
+        self.config.alpha_weight_macd = updated["macd"] / updated_total
+        self.config.alpha_weight_imbalance = updated["book_imbalance"] / updated_total
 
     def _refresh_vpin_signal(self) -> None:
         if not self.config.vpin_enabled:
@@ -1734,6 +1792,7 @@ class GridStrategy(StrategyEngine):
             realized = proceeds - cost_basis
             self._daily_realized_pnl += realized
             self._realized_pnl_total += realized
+            self._record_alpha_realized_attribution(realized)
 
     def _add_event(self, message: str) -> None:
         with self._state_lock:
@@ -2021,6 +2080,58 @@ class GridStrategy(StrategyEngine):
             "cvar_95_24h_pct": str(cvar),
         }
 
+    def _strategy_performance_ratios(self, lookback: int = 90) -> Dict[str, Decimal]:
+        with self._db_lock:
+            rows = self._db.execute(
+                """
+                SELECT pnl_per_1k
+                FROM daily_stats
+                WHERE product_id = ?
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (self.config.product_id, max(5, lookback)),
+            ).fetchall()
+        if len(rows) < 5:
+            return {"calmar_ratio": Decimal("0"), "information_ratio": Decimal("0")}
+
+        strategy_returns = [Decimal(str(row[0])) / Decimal("1000") for row in reversed(rows)]
+        equity = Decimal("1")
+        peak = Decimal("1")
+        max_drawdown = Decimal("0")
+        for ret in strategy_returns:
+            equity *= Decimal("1") + ret
+            if equity > peak:
+                peak = equity
+            if peak > 0:
+                drawdown = (peak - equity) / peak
+                if drawdown > max_drawdown:
+                    max_drawdown = drawdown
+
+        periods = Decimal(len(strategy_returns))
+        annualized_return = (equity ** (Decimal("365") / periods)) - Decimal("1") if equity > 0 else Decimal("0")
+        calmar = Decimal("0") if max_drawdown <= 0 else annualized_return / max_drawdown
+
+        closes = [c[3] for c in self._fetch_public_candles(limit=max(20, len(strategy_returns) + 2))]
+        benchmark_returns: List[Decimal] = []
+        for prev, cur in zip(closes, closes[1:]):
+            if prev > 0:
+                benchmark_returns.append((cur - prev) / prev)
+        benchmark_returns = benchmark_returns[-len(strategy_returns):]
+
+        if not benchmark_returns or len(benchmark_returns) != len(strategy_returns):
+            return {"calmar_ratio": calmar, "information_ratio": Decimal("0")}
+
+        active_returns = [s - b for s, b in zip(strategy_returns, benchmark_returns)]
+        mean_active = sum(active_returns, Decimal("0")) / Decimal(len(active_returns))
+        variance = sum(((r - mean_active) ** 2 for r in active_returns), Decimal("0")) / Decimal(len(active_returns))
+        tracking_error = variance.sqrt() if variance > 0 else Decimal("0")
+        info_ratio = Decimal("0") if tracking_error <= 0 else mean_active / tracking_error
+        return {
+            "calmar_ratio": calmar,
+            "information_ratio": info_ratio,
+        }
+
     def _status_snapshot(self) -> Dict[str, Any]:
         chart = self._dashboard_chart_snapshot()
         with self._state_lock:
@@ -2063,6 +2174,12 @@ class GridStrategy(StrategyEngine):
                 "consensus_components": dict(self._last_consensus_components),
                 "alpha_confidence_scores": {str(k): str(v) for k, v in self._alpha_confidence_scores.items()},
                 "alpha_signals": dict(self._alpha_signal_snapshot),
+                "alpha_weights": {
+                    "rsi": str(self.config.alpha_weight_rsi),
+                    "macd": str(self.config.alpha_weight_macd),
+                    "book_imbalance": str(self.config.alpha_weight_imbalance),
+                },
+                "performance_attribution": {k: str(v) for k, v in self._alpha_realized_attribution.items()},
                 "vpin": {
                     "value": str(self._vpin_value),
                     "threshold": str(self._vpin_threshold),
@@ -2433,6 +2550,31 @@ class GridStrategy(StrategyEngine):
                 f"bot_vpin_toxic_flow{{{labels}}} {1 if self._vpin_toxic_flow else 0}",
             ]
 
+            ratios = self._strategy_performance_ratios()
+            lines.extend(
+                [
+                    "# HELP bot_calmar_ratio Rolling Calmar ratio of strategy daily returns.",
+                    "# TYPE bot_calmar_ratio gauge",
+                    f"bot_calmar_ratio{{{labels}}} {float(ratios['calmar_ratio'])}",
+                    "# HELP bot_information_ratio Rolling information ratio versus market benchmark.",
+                    "# TYPE bot_information_ratio gauge",
+                    f"bot_information_ratio{{{labels}}} {float(ratios['information_ratio'])}",
+                    "# HELP bot_alpha_weight Live alpha-fusion weight per component after attribution rebalancing.",
+                    "# TYPE bot_alpha_weight gauge",
+                    f'bot_alpha_weight{{{labels},component="rsi"}} {float(self.config.alpha_weight_rsi)}',
+                    f'bot_alpha_weight{{{labels},component="macd"}} {float(self.config.alpha_weight_macd)}',
+                    f'bot_alpha_weight{{{labels},component="book_imbalance"}} {float(self.config.alpha_weight_imbalance)}',
+                ]
+            )
+            lines.extend(
+                [
+                    "# HELP bot_alpha_attribution_pnl_usd Realized PnL attribution per alpha-fusion component.",
+                    "# TYPE bot_alpha_attribution_pnl_usd gauge",
+                ]
+            )
+            for component, contribution in self._alpha_realized_attribution.items():
+                lines.append(f'bot_alpha_attribution_pnl_usd{{{labels},component="{component}"}} {float(contribution)}')
+
             cumulative = 0
             for limit, count in zip(self._api_latency_buckets_ms, self._api_latency_bucket_counts):
                 cumulative += count
@@ -2555,9 +2697,15 @@ class GridStrategy(StrategyEngine):
                     product_id TEXT NOT NULL,
                     pnl_per_1k TEXT NOT NULL,
                     var_95_24h_pct TEXT NOT NULL,
-                    turnover_ratio TEXT NOT NULL
+                    turnover_ratio TEXT NOT NULL,
+                    calmar_ratio TEXT NOT NULL DEFAULT '0',
+                    information_ratio TEXT NOT NULL DEFAULT '0',
+                    attribution_rsi TEXT NOT NULL DEFAULT '0',
+                    attribution_macd TEXT NOT NULL DEFAULT '0',
+                    attribution_book_imbalance TEXT NOT NULL DEFAULT '0'
                 )
             """)
+            self._ensure_daily_stats_columns(cur)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS state_meta (
                     key TEXT PRIMARY KEY,
@@ -2565,6 +2713,19 @@ class GridStrategy(StrategyEngine):
                 )
             """)
             self._db.commit()
+
+    def _ensure_daily_stats_columns(self, cur: sqlite3.Cursor) -> None:
+        existing = {row[1] for row in cur.execute("PRAGMA table_info(daily_stats)").fetchall() if len(row) > 1}
+        needed = {
+            "calmar_ratio": "TEXT NOT NULL DEFAULT '0'",
+            "information_ratio": "TEXT NOT NULL DEFAULT '0'",
+            "attribution_rsi": "TEXT NOT NULL DEFAULT '0'",
+            "attribution_macd": "TEXT NOT NULL DEFAULT '0'",
+            "attribution_book_imbalance": "TEXT NOT NULL DEFAULT '0'",
+        }
+        for column, ddl in needed.items():
+            if column not in existing:
+                cur.execute(f"ALTER TABLE daily_stats ADD COLUMN {column} {ddl}")
 
     def _load_last_ws_sequence(self) -> Optional[int]:
         with self._db_lock:
@@ -2666,13 +2827,37 @@ class GridStrategy(StrategyEngine):
         pnl_per_1k = (self._daily_realized_pnl / capital_used) * Decimal("1000")
         turnover_ratio = self._daily_turnover_usd / capital_used
         risk = self._risk_metrics()
+        ratios = self._strategy_performance_ratios()
+        self._rebalance_alpha_weights_from_attribution()
         with self._db_lock:
             self._db.execute(
                 """
-                INSERT INTO daily_stats(ts, product_id, pnl_per_1k, var_95_24h_pct, turnover_ratio)
-                VALUES(?,?,?,?,?)
+                INSERT INTO daily_stats(
+                    ts,
+                    product_id,
+                    pnl_per_1k,
+                    var_95_24h_pct,
+                    turnover_ratio,
+                    calmar_ratio,
+                    information_ratio,
+                    attribution_rsi,
+                    attribution_macd,
+                    attribution_book_imbalance
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
-                (time.time(), self.config.product_id, str(pnl_per_1k), str(risk.get("var_95_24h_pct", "0")), str(turnover_ratio)),
+                (
+                    time.time(),
+                    self.config.product_id,
+                    str(pnl_per_1k),
+                    str(risk.get("var_95_24h_pct", "0")),
+                    str(turnover_ratio),
+                    str(ratios.get("calmar_ratio", Decimal("0"))),
+                    str(ratios.get("information_ratio", Decimal("0"))),
+                    str(self._alpha_realized_attribution.get("rsi", Decimal("0"))),
+                    str(self._alpha_realized_attribution.get("macd", Decimal("0"))),
+                    str(self._alpha_realized_attribution.get("book_imbalance", Decimal("0"))),
+                ),
             )
             self._db.commit()
 
