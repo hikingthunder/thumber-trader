@@ -539,11 +539,27 @@ class GridStrategy(StrategyEngine):
             "macd": Decimal("0"),
             "book_imbalance": Decimal("0"),
         }
+        self._alpha_shap_baseline: Dict[str, Decimal] = {
+            "rsi": Decimal("0"),
+            "macd": Decimal("0"),
+            "book_imbalance": Decimal("0"),
+        }
+        self._alpha_shap_last_values: Dict[str, Decimal] = {
+            "rsi": Decimal("0"),
+            "macd": Decimal("0"),
+            "book_imbalance": Decimal("0"),
+        }
+        self._alpha_shap_last_raw: Dict[str, Decimal] = {
+            "rsi": Decimal("0"),
+            "macd": Decimal("0"),
+            "book_imbalance": Decimal("0"),
+        }
         self._alpha_realized_attribution: Dict[str, Decimal] = {
             "rsi": Decimal("0"),
             "macd": Decimal("0"),
             "book_imbalance": Decimal("0"),
         }
+        self._alpha_trade_shap_history: collections.deque[Dict[str, Decimal]] = collections.deque(maxlen=300)
         self._vpin_bucket_fill = Decimal("0")
         self._vpin_bucket_buy = Decimal("0")
         self._vpin_bucket_sell = Decimal("0")
@@ -1823,6 +1839,7 @@ class GridStrategy(StrategyEngine):
             "macd": macd_component,
             "book_imbalance": imbalance,
         }
+        self._refresh_alpha_shap_values(current_price=current_price)
 
         scores: Dict[int, Decimal] = {}
         for idx, level in enumerate(self.grid_levels):
@@ -1844,18 +1861,44 @@ class GridStrategy(StrategyEngine):
     def _confidence_order_multiplier(self, confidence: Decimal) -> Decimal:
         return Decimal("0.5") + max(Decimal("0"), min(Decimal("1"), confidence))
 
+    def _refresh_alpha_shap_values(self, current_price: Decimal) -> None:
+        component_names = tuple(self._alpha_component_snapshot.keys())
+        component_values = {name: self._alpha_component_snapshot.get(name, Decimal("0")) for name in component_names}
+        self._alpha_shap_last_raw = dict(component_values)
+
+        closes = [c[3] for c in self._fetch_public_candles(limit=max(20, self.config.trend_candle_limit))]
+        returns = _returns(closes)
+        if returns:
+            mean_return = sum(returns) / len(returns)
+            variance = sum((ret - mean_return) ** 2 for ret in returns) / len(returns)
+            volatility = Decimal(str(math.sqrt(max(0.0, variance))))
+        else:
+            volatility = Decimal("0")
+
+        price_ref = closes[-1] if closes else current_price
+        regime_scale = Decimal("1") + min(Decimal("3"), volatility * Decimal("40"))
+        if price_ref > 0:
+            regime_scale += min(Decimal("1"), abs((current_price - price_ref) / price_ref) * Decimal("10"))
+
+        for name, value in component_values.items():
+            baseline = self._alpha_shap_baseline.get(name, Decimal("0"))
+            self._alpha_shap_last_values[name] = (value - baseline) / regime_scale
+
     def _record_alpha_realized_attribution(self, realized_pnl_usd: Decimal) -> None:
         if realized_pnl_usd == 0:
             return
-        components = self._alpha_component_snapshot
-        denom = sum((abs(value) for value in components.values()), Decimal("0"))
-        if denom <= 0:
+
+        shap_values = {name: self._alpha_shap_last_values.get(name, Decimal("0")) for name in self._alpha_realized_attribution.keys()}
+        total_abs_shap = sum((abs(value) for value in shap_values.values()), Decimal("0"))
+        if total_abs_shap <= 0:
             return
-        for name, value in components.items():
-            weight = abs(value) / denom
-            aligned = (realized_pnl_usd >= 0 and value >= 0) or (realized_pnl_usd < 0 and value < 0)
-            signed_alignment = Decimal("1") if aligned else Decimal("-1")
-            self._alpha_realized_attribution[name] += realized_pnl_usd * weight * signed_alignment
+
+        trade_entry: Dict[str, Decimal] = {}
+        for name, shap_value in shap_values.items():
+            contribution = realized_pnl_usd * (shap_value / total_abs_shap)
+            self._alpha_realized_attribution[name] += contribution
+            trade_entry[name] = contribution
+        self._alpha_trade_shap_history.append(trade_entry)
 
     def _rebalance_alpha_weights_from_attribution(self) -> None:
         current_weights = {
@@ -1863,12 +1906,17 @@ class GridStrategy(StrategyEngine):
             "macd": self.config.alpha_weight_macd,
             "book_imbalance": self.config.alpha_weight_imbalance,
         }
-        positive_scores = {k: max(Decimal("0"), v) for k, v in self._alpha_realized_attribution.items()}
-        positive_total = sum(positive_scores.values(), Decimal("0"))
-        if positive_total <= 0:
+        signal_strength = {
+            key: abs(self._alpha_shap_last_values.get(key, Decimal("0")))
+            for key in current_weights.keys()
+        }
+        signal_total = sum(signal_strength.values(), Decimal("0"))
+        if signal_total <= 0:
             return
 
         learning_rate = Decimal("0.2")
+        floor_weight = Decimal("0.05")
+        noise_floor = Decimal("0.01")
         total_current = sum(current_weights.values(), Decimal("0"))
         if total_current <= 0:
             total_current = Decimal("1")
@@ -1876,9 +1924,15 @@ class GridStrategy(StrategyEngine):
         updated: Dict[str, Decimal] = {}
         for key, current in current_weights.items():
             current_norm = current / total_current
-            target = positive_scores[key] / positive_total
+            target = signal_strength[key] / signal_total
+            if signal_strength[key] < noise_floor:
+                target = Decimal("0")
             blended = (current_norm * (Decimal("1") - learning_rate)) + (target * learning_rate)
-            updated[key] = max(Decimal("0.05"), blended)
+            updated[key] = max(floor_weight, blended)
+
+            baseline = self._alpha_shap_baseline.get(key, Decimal("0"))
+            latest = self._alpha_shap_last_raw.get(key, Decimal("0"))
+            self._alpha_shap_baseline[key] = (baseline * Decimal("0.95")) + (latest * Decimal("0.05"))
 
         updated_total = sum(updated.values(), Decimal("0"))
         if updated_total <= 0:
@@ -2606,6 +2660,8 @@ class GridStrategy(StrategyEngine):
                     "macd": str(self.config.alpha_weight_macd),
                     "book_imbalance": str(self.config.alpha_weight_imbalance),
                 },
+                "alpha_shap_values": {k: str(v) for k, v in self._alpha_shap_last_values.items()},
+                "alpha_shap_baseline": {k: str(v) for k, v in self._alpha_shap_baseline.items()},
                 "performance_attribution": {k: str(v) for k, v in self._alpha_realized_attribution.items()},
                 "vpin": {
                     "value": str(self._vpin_value),
@@ -3069,6 +3125,14 @@ class GridStrategy(StrategyEngine):
             )
             for component, contribution in self._alpha_realized_attribution.items():
                 lines.append(f'bot_alpha_attribution_pnl_usd{{{labels},component="{component}"}} {float(contribution)}')
+            lines.extend(
+                [
+                    "# HELP bot_alpha_shap_value Last SHAP-style contribution signal per alpha component.",
+                    "# TYPE bot_alpha_shap_value gauge",
+                ]
+            )
+            for component, shap_value in self._alpha_shap_last_values.items():
+                lines.append(f'bot_alpha_shap_value{{{labels},component="{component}"}} {float(shap_value)}')
 
             cumulative = 0
             for limit, count in zip(self._api_latency_buckets_ms, self._api_latency_bucket_counts):
@@ -3209,7 +3273,10 @@ class GridStrategy(StrategyEngine):
                     information_ratio TEXT NOT NULL DEFAULT '0',
                     attribution_rsi TEXT NOT NULL DEFAULT '0',
                     attribution_macd TEXT NOT NULL DEFAULT '0',
-                    attribution_book_imbalance TEXT NOT NULL DEFAULT '0'
+                    attribution_book_imbalance TEXT NOT NULL DEFAULT '0',
+                    shap_rsi TEXT NOT NULL DEFAULT '0',
+                    shap_macd TEXT NOT NULL DEFAULT '0',
+                    shap_book_imbalance TEXT NOT NULL DEFAULT '0'
                 )
             """)
             self._ensure_daily_stats_columns(cur)
@@ -3239,6 +3306,9 @@ class GridStrategy(StrategyEngine):
             "attribution_rsi": "TEXT NOT NULL DEFAULT '0'",
             "attribution_macd": "TEXT NOT NULL DEFAULT '0'",
             "attribution_book_imbalance": "TEXT NOT NULL DEFAULT '0'",
+            "shap_rsi": "TEXT NOT NULL DEFAULT '0'",
+            "shap_macd": "TEXT NOT NULL DEFAULT '0'",
+            "shap_book_imbalance": "TEXT NOT NULL DEFAULT '0'",
         }
         for column, ddl in needed.items():
             if column not in existing:
@@ -3474,9 +3544,12 @@ class GridStrategy(StrategyEngine):
                     information_ratio,
                     attribution_rsi,
                     attribution_macd,
-                    attribution_book_imbalance
+                    attribution_book_imbalance,
+                    shap_rsi,
+                    shap_macd,
+                    shap_book_imbalance
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     time.time(),
@@ -3489,6 +3562,9 @@ class GridStrategy(StrategyEngine):
                     str(self._alpha_realized_attribution.get("rsi", Decimal("0"))),
                     str(self._alpha_realized_attribution.get("macd", Decimal("0"))),
                     str(self._alpha_realized_attribution.get("book_imbalance", Decimal("0"))),
+                    str(self._alpha_shap_last_values.get("rsi", Decimal("0"))),
+                    str(self._alpha_shap_last_values.get("macd", Decimal("0"))),
+                    str(self._alpha_shap_last_values.get("book_imbalance", Decimal("0"))),
                 ),
             )
             self._db.commit()
