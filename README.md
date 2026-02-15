@@ -33,6 +33,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Applies risk controls (USD reserve, BTC inventory cap, stop-loss awareness).
 - Adds trend bias (EMA fast/slow over Coinbase candles) to be more defensive in downtrends.
 - Detects market regime via ADX (or optional HMM probabilistic states) and auto-adjusts grid width + buy order notional for trending vs ranging conditions.
+- Supports an HMM shadow model registry with KS-drift monitoring between live returns and training distribution; can auto-retrain production HMM asynchronously on drift threshold breaches.
 - In multi-asset mode, tightens correlated products' inventory caps when one asset is already near its own inventory limit.
 - Optional cointegration pair-trading overlay computes spread z-scores and biases per-asset inventory caps for mean reversion.
 
@@ -287,6 +288,15 @@ HMM_STATES=3
 HMM_LOOKBACK=120
 HMM_ITERATIONS=12
 HMM_MIN_VARIANCE=0.00000001
+
+# Shadow model registry + drift monitoring
+MODEL_REGISTRY_ENABLED=true
+MODEL_DRIFT_MONITOR_ENABLED=true
+MODEL_DRIFT_RETRAIN_ENABLED=true
+MODEL_REGISTRY_TRAINING_WINDOW=2000
+MODEL_REGISTRY_EVAL_WINDOW=400
+MODEL_DRIFT_KS_THRESHOLD=0.20
+MODEL_DRIFT_POLL_SECONDS=300
 
 STATE_DB_PATH=/opt/thumber-trader/grid_state.db
 # Optional legacy mirror for old tooling (disabled by default)
