@@ -33,6 +33,7 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Adds trend bias (EMA fast/slow over Coinbase candles) to be more defensive in downtrends.
 - Detects market regime via ADX (or optional HMM probabilistic states) and auto-adjusts grid width + buy order notional for trending vs ranging conditions.
 - In multi-asset mode, tightens correlated products' inventory caps when one asset is already near its own inventory limit.
+- Optional cointegration pair-trading overlay computes spread z-scores and biases per-asset inventory caps for mean reversion.
 
 ## 1) Debian 13 / Proxmox LXC setup
 
@@ -215,6 +216,15 @@ CROSS_ASSET_INVENTORY_TIGHTENING_FACTOR=0.65
 CROSS_ASSET_INVENTORY_MIN_PCT=0.20
 CROSS_ASSET_CANDLE_LOOKBACK=48
 CROSS_ASSET_REFRESH_SECONDS=300
+
+# Optional cointegration pair-trading overlay (pairs use LEFT:RIGHT format)
+COINTEGRATION_PAIR_TRADING_ENABLED=false
+COINTEGRATION_PAIRS=BTC-USD:ETH-USD
+COINTEGRATION_LOOKBACK=96
+COINTEGRATION_MIN_CORRELATION=0.75
+COINTEGRATION_ENTRY_Z=2.0
+COINTEGRATION_EXIT_Z=0.75
+COINTEGRATION_MAX_HALF_LIFE_BARS=72
 
 TREND_GRANULARITY=ONE_HOUR
 TREND_CANDLE_LIMIT=72

@@ -199,6 +199,20 @@ class BotConfig:
     cross_asset_candle_lookback: int = int(os.getenv("CROSS_ASSET_CANDLE_LOOKBACK", "48"))
     cross_asset_refresh_seconds: int = int(os.getenv("CROSS_ASSET_REFRESH_SECONDS", "300"))
 
+    # cointegration-based pair trading overlay
+    cointegration_pair_trading_enabled: bool = os.getenv("COINTEGRATION_PAIR_TRADING_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    cointegration_pairs: str = os.getenv("COINTEGRATION_PAIRS", "")
+    cointegration_lookback: int = int(os.getenv("COINTEGRATION_LOOKBACK", "96"))
+    cointegration_min_correlation: Decimal = Decimal(os.getenv("COINTEGRATION_MIN_CORRELATION", "0.75"))
+    cointegration_entry_z: Decimal = Decimal(os.getenv("COINTEGRATION_ENTRY_Z", "2.0"))
+    cointegration_exit_z: Decimal = Decimal(os.getenv("COINTEGRATION_EXIT_Z", "0.75"))
+    cointegration_max_half_life_bars: Decimal = Decimal(os.getenv("COINTEGRATION_MAX_HALF_LIFE_BARS", "72"))
+
     # operational circuit breaker
     api_circuit_breaker_enabled: bool = os.getenv("API_CIRCUIT_BREAKER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     api_latency_p95_threshold_ms: float = float(os.getenv("API_LATENCY_P95_THRESHOLD_MS", "2000"))
@@ -243,6 +257,8 @@ class SharedRiskState:
         self.cross_asset_inventory_caps: Dict[str, Decimal] = {}
         self.pairwise_correlations: Dict[Tuple[str, str], Decimal] = {}
         self.portfolio_beta = Decimal("0")
+        self.cointegration_targets: Dict[str, Decimal] = {}
+        self.cointegration_signals: Dict[Tuple[str, str], Dict[str, str]] = {}
 
     def set_inventory_cap(self, product_id: str, cap: Decimal) -> None:
         with self.lock:
@@ -269,6 +285,24 @@ class SharedRiskState:
     def get_portfolio_beta(self) -> Decimal:
         with self.lock:
             return self.portfolio_beta
+
+
+    def set_cointegration_target(self, product_id: str, target: Decimal) -> None:
+        with self.lock:
+            self.cointegration_targets[product_id] = target
+
+    def get_cointegration_target(self, product_id: str) -> Optional[Decimal]:
+        with self.lock:
+            return self.cointegration_targets.get(product_id)
+
+    def set_cointegration_signal(self, left: str, right: str, signal: Dict[str, str]) -> None:
+        key = tuple(sorted((left, right)))
+        with self.lock:
+            self.cointegration_signals[key] = dict(signal)
+
+    def get_cointegration_signals(self) -> Dict[Tuple[str, str], Dict[str, str]]:
+        with self.lock:
+            return {key: dict(value) for key, value in self.cointegration_signals.items()}
 
 
 class StrategyEngine:
@@ -1054,6 +1088,9 @@ class GridStrategy(StrategyEngine):
             shared_cap = self.shared_risk_state.get_inventory_cap(self.config.product_id)
             if shared_cap is not None:
                 cap = min(cap, shared_cap)
+            cointegration_target = self.shared_risk_state.get_cointegration_target(self.config.product_id)
+            if cointegration_target is not None:
+                cap = min(cap, cointegration_target)
         return cap
 
     def _buy_safe_mode_active(self) -> bool:
@@ -1971,6 +2008,7 @@ class GridStrategy(StrategyEngine):
             portfolio_beta = self.shared_risk_state.get_portfolio_beta() if self.shared_risk_state is not None else Decimal("0")
             turnover_ratio = self._daily_turnover_usd / capital_used
             risk = self._risk_metrics()
+            cointegration_signals = self.shared_risk_state.get_cointegration_signals() if self.shared_risk_state is not None else {}
             return {
                 "product_id": self.config.product_id,
                 "paper_trading_mode": self.config.paper_trading_mode,
@@ -2013,6 +2051,7 @@ class GridStrategy(StrategyEngine):
                 "api_health": dict(self._last_api_health_report),
                 "sentiment_health": dict(self._last_sentiment_report),
                 "risk_metrics": risk,
+                "cointegration_signals": {f"{left}|{right}": signal for (left, right), signal in cointegration_signals.items()},
                 "portfolio_beta": str(portfolio_beta),
                 "recent_events": list(self.recent_events),
                 "orders": self.orders,
@@ -2750,6 +2789,18 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("CROSS_ASSET_CANDLE_LOOKBACK must be >= 2")
     if config.cross_asset_refresh_seconds < 5:
         raise ValueError("CROSS_ASSET_REFRESH_SECONDS must be >= 5")
+    if config.cointegration_lookback < 20:
+        raise ValueError("COINTEGRATION_LOOKBACK must be >= 20")
+    if config.cointegration_min_correlation < Decimal("0") or config.cointegration_min_correlation > Decimal("1"):
+        raise ValueError("COINTEGRATION_MIN_CORRELATION must be in [0,1]")
+    if config.cointegration_entry_z <= 0:
+        raise ValueError("COINTEGRATION_ENTRY_Z must be > 0")
+    if config.cointegration_exit_z < 0:
+        raise ValueError("COINTEGRATION_EXIT_Z must be >= 0")
+    if config.cointegration_exit_z > config.cointegration_entry_z:
+        raise ValueError("COINTEGRATION_EXIT_Z must be <= COINTEGRATION_ENTRY_Z")
+    if config.cointegration_max_half_life_bars <= 0:
+        raise ValueError("COINTEGRATION_MAX_HALF_LIFE_BARS must be > 0")
     if config.api_latency_p95_threshold_ms <= 0:
         raise ValueError("API_LATENCY_P95_THRESHOLD_MS must be > 0")
     if not (Decimal("0") <= config.api_failure_rate_threshold_pct <= Decimal("1")):
@@ -3119,6 +3170,48 @@ def _beta(asset_returns: List[Decimal], benchmark_returns: List[Decimal]) -> Dec
     return cov / var_x
 
 
+def _linreg_slope_intercept(xs: List[Decimal], ys: List[Decimal]) -> Tuple[Decimal, Decimal]:
+    n = min(len(xs), len(ys))
+    if n < 2:
+        return Decimal("0"), Decimal("0")
+    x = xs[-n:]
+    y = ys[-n:]
+    mean_x = sum(x, Decimal("0")) / Decimal(n)
+    mean_y = sum(y, Decimal("0")) / Decimal(n)
+    var_x = sum((xi - mean_x) * (xi - mean_x) for xi in x) / Decimal(n)
+    if var_x <= 0:
+        return Decimal("0"), mean_y
+    cov = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y)) / Decimal(n)
+    slope = cov / var_x
+    intercept = mean_y - (slope * mean_x)
+    return slope, intercept
+
+
+def _residual_half_life_bars(residuals: List[Decimal]) -> Decimal:
+    if len(residuals) < 3:
+        return Decimal("999999")
+    lagged = residuals[:-1]
+    delta = [cur - prev for prev, cur in zip(residuals[:-1], residuals[1:])]
+    beta, _ = _linreg_slope_intercept(lagged, delta)
+    if beta >= 0:
+        return Decimal("999999")
+    beta_abs = abs(beta)
+    if beta_abs <= Decimal("0.00000001"):
+        return Decimal("999999")
+    return Decimal(str(math.log(2.0))) / beta_abs
+
+
+def _zscore(values: List[Decimal]) -> Decimal:
+    if len(values) < 2:
+        return Decimal("0")
+    mean = sum(values, Decimal("0")) / Decimal(len(values))
+    var = sum((v - mean) * (v - mean) for v in values) / Decimal(len(values))
+    if var <= 0:
+        return Decimal("0")
+    std = var.sqrt()
+    return (values[-1] - mean) / std
+
+
 def _decimal_percentile(values: List[Decimal], percentile: Decimal) -> Decimal:
     if not values:
         return Decimal("0")
@@ -3275,6 +3368,100 @@ class StrategyManager:
         else:
             self._shared_risk_state.set_portfolio_beta(Decimal("0"))
 
+    def _cointegration_pairs(self) -> List[Tuple[str, str]]:
+        if not self.config.cointegration_pairs.strip():
+            return []
+        available = {engine.config.product_id for engine in self.engines}
+        pairs: List[Tuple[str, str]] = []
+        for token in self.config.cointegration_pairs.replace(";", ",").split(","):
+            item = token.strip().upper()
+            if not item:
+                continue
+            if ":" in item:
+                left, right = [part.strip() for part in item.split(":", 1)]
+            elif "|" in item:
+                left, right = [part.strip() for part in item.split("|", 1)]
+            else:
+                continue
+            if left in available and right in available and left != right:
+                pairs.append((left, right))
+        return pairs
+
+    def _refresh_cointegration_pairs(self) -> None:
+        if not self.config.cointegration_pair_trading_enabled:
+            return
+        pairs = self._cointegration_pairs()
+        if not pairs:
+            return
+
+        for engine in self.engines:
+            self._shared_risk_state.set_cointegration_target(engine.config.product_id, engine.config.max_btc_inventory_pct)
+
+        for left_id, right_id in pairs:
+            left_closes = self._fetch_closes_for_product(left_id)
+            right_closes = self._fetch_closes_for_product(right_id)
+            n = min(len(left_closes), len(right_closes), self.config.cointegration_lookback)
+            if n < 20:
+                continue
+            left = left_closes[-n:]
+            right = right_closes[-n:]
+            corr = _pearson_corr(_returns_from_closes(left), _returns_from_closes(right))
+            if abs(corr) < self.config.cointegration_min_correlation:
+                continue
+
+            hedge_ratio, intercept = _linreg_slope_intercept(right, left)
+            residuals = [l - (intercept + hedge_ratio * r) for l, r in zip(left, right)]
+            z = _zscore(residuals)
+            half_life = _residual_half_life_bars(residuals)
+            if half_life > self.config.cointegration_max_half_life_bars:
+                continue
+
+            left_target = self._shared_risk_state.get_inventory_cap(left_id) or Decimal("1")
+            right_target = self._shared_risk_state.get_inventory_cap(right_id) or Decimal("1")
+            entry = self.config.cointegration_entry_z
+            exit_z = self.config.cointegration_exit_z
+            neutral_left = min(left_target, Decimal("0.50"))
+            neutral_right = min(right_target, Decimal("0.50"))
+            if abs(z) <= exit_z:
+                left_target = neutral_left
+                right_target = neutral_right
+                regime = "exit"
+            elif z >= entry:
+                left_target = min(left_target, Decimal("0.25"))
+                right_target = min(right_target, Decimal("0.75"))
+                regime = "short_left_long_right"
+            elif z <= -entry:
+                left_target = min(left_target, Decimal("0.75"))
+                right_target = min(right_target, Decimal("0.25"))
+                regime = "long_left_short_right"
+            else:
+                regime = "hold"
+
+            self._shared_risk_state.set_cointegration_target(left_id, left_target)
+            self._shared_risk_state.set_cointegration_target(right_id, right_target)
+            self._shared_risk_state.set_cointegration_signal(
+                left_id,
+                right_id,
+                {
+                    "left": left_id,
+                    "right": right_id,
+                    "corr": str(corr),
+                    "zscore": str(z),
+                    "half_life_bars": str(half_life),
+                    "hedge_ratio": str(hedge_ratio),
+                    "regime": regime,
+                },
+            )
+            logging.info(
+                "Cointegration pair %s/%s regime=%s z=%.2f corr=%.2f hl=%s bars",
+                left_id,
+                right_id,
+                regime,
+                float(z),
+                float(corr),
+                str(half_life.quantize(Decimal('0.1')) if half_life < Decimal('999999') else half_life),
+            )
+
     def _compute_kelly_fraction(self, engine: StrategyEngine) -> Optional[Decimal]:
         with engine._db_lock:
             rows = engine._db.execute(
@@ -3377,6 +3564,7 @@ class StrategyManager:
         kelly_next_refresh = 0.0
         while any(engine._running for engine in self.engines):
             await asyncio.to_thread(self._refresh_cross_asset_risk)
+            await asyncio.to_thread(self._refresh_cointegration_pairs)
             now = time.time()
             if now >= kelly_next_refresh:
                 await asyncio.to_thread(self._refresh_kelly_allocations)
