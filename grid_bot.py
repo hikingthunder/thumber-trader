@@ -46,6 +46,15 @@ getcontext().prec = 28
 MASKED_SECRET_PLACEHOLDER = "********"
 
 
+@dataclass
+class HMMModelSnapshot:
+    init_prob: List[float]
+    trans: List[List[float]]
+    means: List[float]
+    variances: List[float]
+    training_returns: List[float]
+
+
 
 
 
@@ -150,6 +159,23 @@ class BotConfig:
     hmm_lookback: int = int(os.getenv("HMM_LOOKBACK", "120"))
     hmm_iterations: int = int(os.getenv("HMM_ITERATIONS", "12"))
     hmm_min_variance: Decimal = Decimal(os.getenv("HMM_MIN_VARIANCE", "0.00000001"))
+    model_registry_enabled: bool = os.getenv("MODEL_REGISTRY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    model_drift_monitor_enabled: bool = os.getenv("MODEL_DRIFT_MONITOR_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    model_drift_retrain_enabled: bool = os.getenv("MODEL_DRIFT_RETRAIN_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    model_registry_training_window: int = int(os.getenv("MODEL_REGISTRY_TRAINING_WINDOW", "2000"))
+    model_registry_eval_window: int = int(os.getenv("MODEL_REGISTRY_EVAL_WINDOW", "400"))
+    model_drift_ks_threshold: Decimal = Decimal(os.getenv("MODEL_DRIFT_KS_THRESHOLD", "0.20"))
+    model_drift_poll_seconds: int = int(os.getenv("MODEL_DRIFT_POLL_SECONDS", "300"))
     dynamic_inventory_cap_enabled: bool = os.getenv("DYNAMIC_INVENTORY_CAP_ENABLED", "false").strip().lower() in {
         "1",
         "true",
@@ -460,6 +486,13 @@ class GridStrategy(StrategyEngine):
         self._market_regime = "UNKNOWN"
         self._market_regime_source = "ADX"
         self._market_regime_confidence = Decimal("0")
+        self._hmm_registry: Dict[str, Optional[HMMModelSnapshot]] = {"production": None, "candidate": None}
+        self._hmm_drift_score = Decimal("0")
+        self._hmm_drift_threshold = self.config.model_drift_ks_threshold
+        self._hmm_drift_detected = False
+        self._hmm_last_retrain_ts = 0.0
+        self._hmm_last_retrain_reason = ""
+        self._hmm_last_registry_update_ts = 0.0
         self._active_inventory_cap_pct = self.config.max_btc_inventory_pct
         self._capital_allocation_multiplier = Decimal("1")
         self._capital_allocation_signal = Decimal("0")
@@ -568,6 +601,8 @@ class GridStrategy(StrategyEngine):
         ]
         if self.config.sentiment_override_enabled:
             tasks.append(asyncio.create_task(self._sentiment_monitor_loop(), name="sentiment-monitor"))
+        if self.config.model_registry_enabled and self.config.model_drift_monitor_enabled:
+            tasks.append(asyncio.create_task(self._model_registry_monitor_loop(), name="model-registry-monitor"))
         try:
             await asyncio.gather(*tasks)
         finally:
@@ -666,6 +701,142 @@ class GridStrategy(StrategyEngine):
             except Exception as exc:
                 logging.exception("Sentiment monitor loop error: %s", exc)
             await asyncio.sleep(max(30, self.config.sentiment_refresh_seconds))
+
+    async def _model_registry_monitor_loop(self) -> None:
+        while self._running:
+            try:
+                await asyncio.to_thread(self._refresh_hmm_model_registry)
+            except Exception as exc:
+                logging.exception("Model registry monitor loop error: %s", exc)
+            await asyncio.sleep(max(30, self.config.model_drift_poll_seconds))
+
+    def _refresh_hmm_model_registry(self) -> None:
+        if not self.config.hmm_regime_detection_enabled:
+            return
+
+        closes = self._fetch_public_candle_closes()
+        if len(closes) < 3:
+            return
+
+        returns = _returns(closes)
+        if len(returns) < 40:
+            return
+
+        train_window = max(100, self.config.model_registry_training_window)
+        eval_window = max(30, self.config.model_registry_eval_window)
+        usable = returns[-(train_window + eval_window) :]
+        if len(usable) < eval_window + 20:
+            return
+
+        training_returns = usable[:-eval_window]
+        eval_returns = usable[-eval_window:]
+        if len(training_returns) < max(20, self.config.hmm_states * 4):
+            return
+
+        production = _fit_gaussian_hmm(
+            training_returns,
+            n_states=self.config.hmm_states,
+            iterations=self.config.hmm_iterations,
+            min_variance=self.config.hmm_min_variance,
+        )
+        if production is None:
+            return
+
+        candidate_window = max(60, int(len(training_returns) * 0.6))
+        candidate_returns = training_returns[-candidate_window:]
+        candidate = _fit_gaussian_hmm(
+            candidate_returns,
+            n_states=self.config.hmm_states,
+            iterations=max(1, self.config.hmm_iterations // 2),
+            min_variance=self.config.hmm_min_variance,
+        )
+        if candidate is None:
+            return
+
+        prod_init, prod_trans, prod_means, prod_variances = production
+        cand_init, cand_trans, cand_means, cand_variances = candidate
+        self._hmm_registry["production"] = HMMModelSnapshot(
+            init_prob=prod_init,
+            trans=prod_trans,
+            means=prod_means,
+            variances=prod_variances,
+            training_returns=training_returns,
+        )
+        self._hmm_registry["candidate"] = HMMModelSnapshot(
+            init_prob=cand_init,
+            trans=cand_trans,
+            means=cand_means,
+            variances=cand_variances,
+            training_returns=candidate_returns,
+        )
+
+        ks = _kolmogorov_smirnov_statistic(training_returns, eval_returns)
+        self._hmm_drift_score = Decimal(str(ks))
+        self._hmm_drift_detected = self._hmm_drift_score >= self._hmm_drift_threshold
+        self._hmm_last_registry_update_ts = time.time()
+
+        if self._hmm_drift_detected and self.config.model_drift_retrain_enabled:
+            if self._event_loop is not None:
+                self._event_loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._retrain_hmm_from_latest_data(reason="ks_drift_threshold"))
+                )
+
+    async def _retrain_hmm_from_latest_data(self, reason: str) -> None:
+        if not self.config.hmm_regime_detection_enabled:
+            return
+        if time.time() - self._hmm_last_retrain_ts < max(30, self.config.model_drift_poll_seconds):
+            return
+
+        closes = await asyncio.to_thread(self._fetch_public_candle_closes)
+        returns = _returns(closes)
+        if len(returns) < 40:
+            return
+
+        train_window = max(100, self.config.model_registry_training_window)
+        latest_returns = returns[-train_window:]
+        retrained = _fit_gaussian_hmm(
+            latest_returns,
+            n_states=self.config.hmm_states,
+            iterations=self.config.hmm_iterations,
+            min_variance=self.config.hmm_min_variance,
+        )
+        if retrained is None:
+            return
+
+        init_prob, trans, means, variances = retrained
+        self._hmm_registry["production"] = HMMModelSnapshot(
+            init_prob=init_prob,
+            trans=trans,
+            means=means,
+            variances=variances,
+            training_returns=latest_returns,
+        )
+        self._hmm_last_retrain_ts = time.time()
+        self._hmm_last_retrain_reason = reason
+        self._hmm_drift_detected = False
+        self._hmm_drift_score = Decimal("0")
+        logging.warning("Retrained production HMM due to %s using %s latest return observations.", reason, len(latest_returns))
+
+    def _classify_hmm_regime(self, model: HMMModelSnapshot, recent_returns: List[float]) -> Optional[Tuple[str, Decimal]]:
+        if not recent_returns:
+            return None
+        probs = _hmm_filter_probabilities(recent_returns, model.init_prob, model.trans, model.means, model.variances)
+        if not probs:
+            return None
+
+        winner = max(range(len(probs)), key=lambda idx: probs[idx])
+        confidence = probs[winner]
+        vol_rank = sorted(range(len(model.variances)), key=lambda idx: model.variances[idx])
+        low_vol_state = vol_rank[0]
+        high_vol_state = vol_rank[-1]
+        if winner == low_vol_state:
+            regime = "RANGING"
+        elif winner == high_vol_state:
+            regime = "TRENDING"
+        else:
+            regime = "TRANSITION"
+
+        return regime, Decimal(str(confidence))
 
     def _load_product_metadata(self) -> None:
         product = _as_dict(self._coinbase_api_call("get_product", self.client.get_product, product_id=self.config.product_id))
@@ -1380,6 +1551,26 @@ class GridStrategy(StrategyEngine):
             logging.debug("HMM regime detection skipped; need at least %s returns (have %s).", min_obs, len(returns))
             return None
 
+        if self.config.model_registry_enabled:
+            production = self._hmm_registry.get("production")
+            candidate = self._hmm_registry.get("candidate")
+            production_outcome = self._classify_hmm_regime(production, returns) if production is not None else None
+            candidate_outcome = self._classify_hmm_regime(candidate, returns) if candidate is not None else None
+            if production_outcome is not None:
+                regime, confidence = production_outcome
+                if candidate_outcome is not None:
+                    candidate_regime, candidate_confidence = candidate_outcome
+                    logging.info(
+                        "HMM registry production=%s(%.3f) candidate=%s(%.3f) drift=%.4f threshold=%.4f",
+                        regime,
+                        float(confidence),
+                        candidate_regime,
+                        float(candidate_confidence),
+                        float(self._hmm_drift_score),
+                        float(self._hmm_drift_threshold),
+                    )
+                return regime, confidence
+
         model = _fit_gaussian_hmm(
             returns,
             n_states=self.config.hmm_states,
@@ -1389,29 +1580,28 @@ class GridStrategy(StrategyEngine):
         if model is None:
             return None
 
-        probs, means, variances = model
-        winner = max(range(len(probs)), key=lambda idx: probs[idx])
-        confidence = probs[winner]
-
-        vol_rank = sorted(range(len(variances)), key=lambda idx: variances[idx])
-        low_vol_state = vol_rank[0]
-        high_vol_state = vol_rank[-1]
-        if winner == low_vol_state:
-            regime = "RANGING"
-        elif winner == high_vol_state:
-            regime = "TRENDING"
-        else:
-            regime = "TRANSITION"
-
+        init_prob, trans, means, variances = model
+        snapshot = HMMModelSnapshot(
+            init_prob=init_prob,
+            trans=trans,
+            means=means,
+            variances=variances,
+            training_returns=returns,
+        )
+        outcome = self._classify_hmm_regime(snapshot, returns)
+        if outcome is None:
+            return None
+        regime, confidence = outcome
+        winner = max(range(len(init_prob)), key=lambda idx: init_prob[idx])
         logging.info(
             "HMM regime=%s confidence=%.3f state=%s mean=%.6f sigma=%.6f",
             regime,
-            confidence,
+            float(confidence),
             winner,
             means[winner],
             math.sqrt(max(variances[winner], 0.0)),
         )
-        return regime, Decimal(str(confidence))
+        return regime, confidence
 
     def _regime_band_multiplier(self) -> Decimal:
         if self._market_regime == "TRENDING":
@@ -2395,6 +2585,18 @@ class GridStrategy(StrategyEngine):
                 "market_regime": self._market_regime,
                 "market_regime_source": self._market_regime_source,
                 "market_regime_confidence": str(self._market_regime_confidence),
+                "model_registry": {
+                    "enabled": self.config.model_registry_enabled,
+                    "drift_monitor_enabled": self.config.model_drift_monitor_enabled,
+                    "drift_score": str(self._hmm_drift_score),
+                    "drift_threshold": str(self._hmm_drift_threshold),
+                    "drift_detected": self._hmm_drift_detected,
+                    "last_retrain_ts": self._hmm_last_retrain_ts,
+                    "last_retrain_reason": self._hmm_last_retrain_reason,
+                    "last_registry_update_ts": self._hmm_last_registry_update_ts,
+                    "has_production_model": self._hmm_registry.get("production") is not None,
+                    "has_candidate_model": self._hmm_registry.get("candidate") is not None,
+                },
                 "atr_pct": str(self._cached_atr_pct),
                 "consensus_components": dict(self._last_consensus_components),
                 "alpha_confidence_scores": {str(k): str(v) for k, v in self._alpha_confidence_scores.items()},
@@ -3547,6 +3749,14 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("HMM_ITERATIONS must be >= 1")
     if config.hmm_min_variance <= 0:
         raise ValueError("HMM_MIN_VARIANCE must be > 0")
+    if config.model_registry_training_window < 100:
+        raise ValueError("MODEL_REGISTRY_TRAINING_WINDOW must be >= 100")
+    if config.model_registry_eval_window < 30:
+        raise ValueError("MODEL_REGISTRY_EVAL_WINDOW must be >= 30")
+    if config.model_drift_ks_threshold < 0 or config.model_drift_ks_threshold > 1:
+        raise ValueError("MODEL_DRIFT_KS_THRESHOLD must be in [0,1]")
+    if config.model_drift_poll_seconds < 30:
+        raise ValueError("MODEL_DRIFT_POLL_SECONDS must be >= 30")
     if config.base_order_notional_usd <= 0:
         raise ValueError("BASE_ORDER_NOTIONAL_USD must be > 0")
     if config.kelly_refresh_seconds < 30:
@@ -3844,7 +4054,7 @@ def _fit_gaussian_hmm(
     n_states: int,
     iterations: int,
     min_variance: Decimal,
-) -> Optional[Tuple[List[float], List[float], List[float]]]:
+) -> Optional[Tuple[List[float], List[List[float]], List[float], List[float]]]:
     t_len = len(observations)
     if t_len < 2 or n_states < 2:
         return None
@@ -3929,9 +4139,83 @@ def _fit_gaussian_hmm(
             var = sum(gamma[t][i] * ((observations[t] - means[i]) ** 2) for t in range(t_len)) / gamma_sum
             variances[i] = max(var, min_var)
 
-    last_probs = gamma[-1]
+    last_probs = [max(eps, p) for p in gamma[-1]]
     total = max(eps, sum(last_probs))
-    return [p / total for p in last_probs], means, variances
+    init_out = [p / total for p in last_probs]
+    trans_out = [[float(cell) for cell in row] for row in trans]
+    return init_out, trans_out, means, variances
+
+
+def _hmm_filter_probabilities(
+    observations: List[float],
+    init_prob: List[float],
+    trans: List[List[float]],
+    means: List[float],
+    variances: List[float],
+) -> List[float]:
+    if not observations or not init_prob or not trans or not means or not variances:
+        return []
+    n_states = len(init_prob)
+    if n_states == 0:
+        return []
+    eps = 1e-12
+
+    def emission(x: float, mean: float, var: float) -> float:
+        safe_var = max(float(var), eps)
+        coeff = 1.0 / math.sqrt(2.0 * math.pi * safe_var)
+        exponent = math.exp(-((x - mean) ** 2) / (2.0 * safe_var))
+        return max(eps, coeff * exponent)
+
+    probs = [max(eps, float(p)) for p in init_prob[:n_states]]
+    norm = max(eps, sum(probs))
+    probs = [p / norm for p in probs]
+
+    for obs in observations:
+        next_probs = [0.0 for _ in range(n_states)]
+        for j in range(n_states):
+            transition_sum = 0.0
+            for i in range(n_states):
+                transition_sum += probs[i] * max(eps, float(trans[i][j]))
+            next_probs[j] = transition_sum * emission(obs, means[j], variances[j])
+        denom = max(eps, sum(next_probs))
+        probs = [v / denom for v in next_probs]
+
+    return probs
+
+
+def _kolmogorov_smirnov_statistic(sample_a: List[float], sample_b: List[float]) -> float:
+    if not sample_a or not sample_b:
+        return 0.0
+    xs = sorted(sample_a)
+    ys = sorted(sample_b)
+    n = len(xs)
+    m = len(ys)
+    i = 0
+    j = 0
+    cdf_x = 0.0
+    cdf_y = 0.0
+    max_diff = 0.0
+
+    while i < n and j < m:
+        if xs[i] <= ys[j]:
+            i += 1
+            cdf_x = i / n
+        else:
+            j += 1
+            cdf_y = j / m
+        max_diff = max(max_diff, abs(cdf_x - cdf_y))
+
+    while i < n:
+        i += 1
+        cdf_x = i / n
+        max_diff = max(max_diff, abs(cdf_x - cdf_y))
+
+    while j < m:
+        j += 1
+        cdf_y = j / m
+        max_diff = max(max_diff, abs(cdf_x - cdf_y))
+
+    return max_diff
 
 
 def _read_secret(var_name: str, file_var_name: str) -> Optional[str]:
