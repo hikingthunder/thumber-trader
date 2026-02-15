@@ -16,6 +16,8 @@ This README is written for a **Debian 13 (Trixie) Proxmox LXC service deployment
 - Persists state in SQLite (`grid_state.db`) for restart recovery and reporting.
 - Runs the core engine on `asyncio` with concurrent market polling, risk monitoring, and user-stream handling.
 - Uses Coinbase `WSUserClient` for low-latency fill notifications and immediate replacement orders.
+- Supports multi-source consensus pricing by blending mid-prices from Coinbase/Binance/Kraken/Bybit (configurable + outlier filtering).
+- Computes an alpha fusion confidence score per grid level by combining RSI, MACD histogram, and order book imbalance.
 - Tracks Coinbase WebSocket sequence numbers; on any gap, automatically triggers REST `get_orders` reconciliation so local SQLite state recovers before normal execution resumes.
 - Keeps periodic polling (60s default) as a resilience backstop and market-data refresh path.
 - Supports optional exchange-side attached bracket exits for BUY entries.
@@ -99,6 +101,21 @@ MIN_GRID_PROFIT_PCT=0.015
 MAKER_FEE_PCT=0.004
 TARGET_NET_PROFIT_PCT=0.002
 POLL_SECONDS=60
+
+# Multi-venue consensus pricing
+CONSENSUS_PRICING_ENABLED=true
+CONSENSUS_EXCHANGES=coinbase,binance,kraken,bybit
+CONSENSUS_MAX_DEVIATION_PCT=0.02
+
+# Alpha fusion (RSI + MACD + order-book imbalance)
+ALPHA_FUSION_ENABLED=true
+ALPHA_RSI_PERIOD=14
+ALPHA_MACD_FAST=12
+ALPHA_MACD_SLOW=26
+ALPHA_MACD_SIGNAL=9
+ALPHA_WEIGHT_RSI=0.3
+ALPHA_WEIGHT_MACD=0.3
+ALPHA_WEIGHT_IMBALANCE=0.4
 
 DYNAMIC_FEE_TRACKING_ENABLED=true
 FEE_REFRESH_SECONDS=3600
