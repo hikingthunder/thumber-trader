@@ -182,6 +182,11 @@ class BotConfig:
     # safe start
     safe_start_enabled: bool = os.getenv("SAFE_START_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     base_buy_mode: str = os.getenv("BASE_BUY_MODE", "off").strip().lower()
+    base_buy_execution_algo: str = os.getenv("BASE_BUY_EXECUTION_ALGO", "market").strip().lower()
+    base_buy_execution_slices: int = int(os.getenv("BASE_BUY_EXECUTION_SLICES", "6"))
+    base_buy_execution_window_seconds: int = int(os.getenv("BASE_BUY_EXECUTION_WINDOW_SECONDS", "120"))
+    base_buy_vwap_lookback_candles: int = int(os.getenv("BASE_BUY_VWAP_LOOKBACK_CANDLES", "24"))
+    base_buy_vwap_granularity: str = os.getenv("BASE_BUY_VWAP_GRANULARITY", "FIVE_MINUTE").strip().upper()
     shared_usd_reserve_enabled: bool = os.getenv("SHARED_USD_RESERVE_ENABLED", "true").strip().lower() in {
         "1",
         "true",
@@ -2712,12 +2717,35 @@ class GridStrategy(StrategyEngine):
     def _execute_base_buy(self, base_size: Decimal, current_price: Decimal) -> None:
         if base_size <= 0:
             return
+
+        total_base = self._q_base(base_size)
+        if total_base <= 0:
+            return
+
+        algo = self.config.base_buy_execution_algo
+        if algo == "market":
+            self._execute_base_buy_market(total_base, current_price)
+            return
+
+        slices = max(1, self.config.base_buy_execution_slices)
+        spacing_seconds = max(0, self.config.base_buy_execution_window_seconds) / slices
+        if algo == "twap":
+            self._execute_base_buy_twap(total_base, current_price, slices, spacing_seconds)
+            return
+        if algo == "vwap":
+            self._execute_base_buy_vwap(total_base, current_price, slices, spacing_seconds)
+            return
+
+        raise ValueError(f"Unsupported BASE_BUY_EXECUTION_ALGO: {algo}")
+
+    def _execute_base_buy_market(self, base_size: Decimal, current_price: Decimal) -> None:
         quote_size = self._q_price(base_size * current_price)
         if self.config.paper_trading_mode:
             self.paper_balances["USD"] -= quote_size
             self.paper_balances[self.base_currency] += base_size
-            self._add_event(f"Auto base-buy (paper): {base_size} BTC")
+            self._add_event(f"Auto base-buy (paper/market): {base_size} {self.base_currency}")
             return
+
         payload = {
             "client_order_id": str(uuid.uuid4()),
             "product_id": self.config.product_id,
@@ -2725,7 +2753,140 @@ class GridStrategy(StrategyEngine):
             "order_configuration": {"market_market_ioc": {"quote_size": format(quote_size, "f")}},
         }
         _ = self._coinbase_api_call("create_order", self.client.create_order, **payload)
-        self._add_event(f"Auto base-buy executed for {base_size} BTC")
+        self._add_event(f"Auto base-buy executed (market) for {base_size} {self.base_currency}")
+
+    def _execute_base_buy_twap(
+        self,
+        total_base: Decimal,
+        fallback_price: Decimal,
+        slices: int,
+        spacing_seconds: float,
+    ) -> None:
+        self._execute_base_buy_schedule(total_base, fallback_price, slices, spacing_seconds, None, "twap")
+
+    def _execute_base_buy_vwap(
+        self,
+        total_base: Decimal,
+        fallback_price: Decimal,
+        slices: int,
+        spacing_seconds: float,
+    ) -> None:
+        weights = self._derive_vwap_slice_weights(slices)
+        self._execute_base_buy_schedule(total_base, fallback_price, slices, spacing_seconds, weights, "vwap")
+
+    def _execute_base_buy_schedule(
+        self,
+        total_base: Decimal,
+        fallback_price: Decimal,
+        slices: int,
+        spacing_seconds: float,
+        weights: Optional[List[Decimal]],
+        algo_label: str,
+    ) -> None:
+        remaining = total_base
+        allocated = Decimal("0")
+        normalized_weights = weights if weights and len(weights) == slices else None
+
+        for idx in range(slices):
+            if remaining <= 0:
+                break
+
+            if idx == slices - 1:
+                slice_base = remaining
+            elif normalized_weights is None:
+                target = (total_base / Decimal(slices)).quantize(self.base_increment, rounding=ROUND_DOWN)
+                slice_base = min(remaining, target)
+            else:
+                target = (total_base * normalized_weights[idx]).quantize(self.base_increment, rounding=ROUND_DOWN)
+                slice_base = min(remaining, target)
+
+            if slice_base <= 0:
+                continue
+
+            ref_price = fallback_price
+            with contextlib.suppress(Exception):
+                latest = self._get_current_price()
+                if latest > 0:
+                    ref_price = latest
+
+            quote_size = self._q_price(slice_base * ref_price)
+            if quote_size <= 0:
+                continue
+
+            if self.config.paper_trading_mode:
+                self.paper_balances["USD"] -= quote_size
+                self.paper_balances[self.base_currency] += slice_base
+            else:
+                payload = {
+                    "client_order_id": str(uuid.uuid4()),
+                    "product_id": self.config.product_id,
+                    "side": "BUY",
+                    "order_configuration": {"market_market_ioc": {"quote_size": format(quote_size, "f")}},
+                }
+                _ = self._coinbase_api_call("create_order", self.client.create_order, **payload)
+
+            allocated += slice_base
+            remaining = max(Decimal("0"), total_base - allocated)
+
+            if idx < slices - 1 and spacing_seconds > 0:
+                time.sleep(spacing_seconds)
+
+        if allocated > 0:
+            mode = "paper" if self.config.paper_trading_mode else "live"
+            self._add_event(f"Auto base-buy executed ({algo_label}/{mode}) for {allocated} {self.base_currency} in up to {slices} slices")
+
+    def _derive_vwap_slice_weights(self, slices: int) -> Optional[List[Decimal]]:
+        lookback = max(1, self.config.base_buy_vwap_lookback_candles)
+        candles = self._fetch_public_candles_ohlcv(
+            granularity=self.config.base_buy_vwap_granularity,
+            limit=max(lookback, slices),
+        )
+        volumes = [row[4] for row in candles if row[4] > 0]
+        if len(volumes) < slices:
+            return None
+
+        recent = volumes[-slices:]
+        total = sum(recent, Decimal("0"))
+        if total <= 0:
+            return None
+
+        return [v / total for v in recent]
+
+    def _fetch_public_candles_ohlcv(
+        self,
+        granularity: str,
+        limit: int,
+    ) -> List[Tuple[int, Decimal, Decimal, Decimal, Decimal]]:
+        params = urllib.parse.urlencode({"granularity": granularity, "limit": str(limit)})
+        url = f"https://api.coinbase.com/api/v3/brokerage/products/{self.config.product_id}/candles?{params}"
+        try:
+            with self._coinbase_api_call("public_candles_ohlcv", urllib.request.urlopen, url, timeout=15) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            logging.warning("VWAP candle fetch failed: %s", exc)
+            return []
+
+        rows: List[Tuple[int, Decimal, Decimal, Decimal, Decimal]] = []
+        for candle in payload.get("candles", []):
+            start = candle.get("start")
+            high = candle.get("high")
+            low = candle.get("low")
+            close = candle.get("close")
+            volume = candle.get("volume")
+            if start is None or high is None or low is None or close is None or volume is None:
+                continue
+            rows.append(
+                (
+                    int(start),
+                    Decimal(str(high)),
+                    Decimal(str(low)),
+                    Decimal(str(close)),
+                    Decimal(str(volume)),
+                )
+            )
+
+        rows.sort(key=lambda row: row[0])
+        return rows
 
 
 def _validate_config(config: BotConfig) -> None:
@@ -2809,6 +2970,14 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("TRAILING_TRIGGER_LEVELS must be >= 1")
     if config.base_buy_mode not in {"off", "auto"}:
         raise ValueError("BASE_BUY_MODE must be off or auto")
+    if config.base_buy_execution_algo not in {"market", "twap", "vwap"}:
+        raise ValueError("BASE_BUY_EXECUTION_ALGO must be market, twap, or vwap")
+    if config.base_buy_execution_slices < 1:
+        raise ValueError("BASE_BUY_EXECUTION_SLICES must be >= 1")
+    if config.base_buy_execution_window_seconds < 0:
+        raise ValueError("BASE_BUY_EXECUTION_WINDOW_SECONDS must be >= 0")
+    if config.base_buy_vwap_lookback_candles < 1:
+        raise ValueError("BASE_BUY_VWAP_LOOKBACK_CANDLES must be >= 1")
     if not any(item.strip() for item in config.product_ids.replace(";", ",").split(",")):
         raise ValueError("PRODUCT_IDS must include at least one product id")
     if not (Decimal("0") <= config.cross_asset_correlation_threshold <= Decimal("1")):
