@@ -48,6 +48,8 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
       <div><div class="k">Portfolio (USD)</div><div class="v" id="portfolio-value-usd">{snapshot.get('portfolio_value_usd')}</div></div>
       <div><div class="k">Active Orders</div><div class="v" id="active-orders">{snapshot.get('active_orders')}</div></div>
       <div><div class="k">Fills</div><div class="v" id="fills">{snapshot.get('fills')}</div></div>
+      <div><div class="k">Tax Lot Method</div><div class="v" id="tax-lot-method">{snapshot.get('tax_lots', {}).get('method', 'FIFO')}</div></div>
+      <div><div class="k">Open Tax Lots</div><div class="v" id="open-tax-lots">{snapshot.get('tax_lots', {}).get('open_lots', '0')}</div></div>
       <div><div class="k">Survival Prob. (30d)</div><div class="v" id="survival-probability">{snapshot.get('risk_metrics', {}).get('survival_probability_30d', '1')}</div></div>
       <div><div class="k">Risk of Ruin (30d)</div><div class="v" id="risk-of-ruin">{snapshot.get('risk_metrics', {}).get('risk_of_ruin_30d', '0')}</div></div>
     </div>
@@ -62,6 +64,10 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
       <button class="danger" onclick="sendAction('kill_switch')">Emergency Kill Switch</button>
       <button class="primary" onclick="sendAction('reanchor')">Manual Re-anchor</button>
       <button class="primary" onclick="openConfigWindow()">Open Configuration</button>
+      <label class="muted" for="tax-lot-select">Tax Lot:</label>
+      <select id="tax-lot-select" onchange="changeTaxLotMethod()">
+        <option value="FIFO">FIFO</option><option value="LIFO">LIFO</option><option value="HIFO">HIFO</option>
+      </select>
       <a class="btn primary" href="/config">Open Config Page</a>
       <div id="action-status" aria-live="polite"></div>
     </div>
@@ -158,6 +164,12 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
       renderFillMarkers(snapshot);
       chart.timeScale().fitContent();
     }}
+    async function changeTaxLotMethod() {{
+      const sel = document.getElementById('tax-lot-select');
+      if (!sel) return;
+      await sendAction('set_tax_lot_method', {{ method: sel.value }});
+    }}
+
     function initChart() {{
       const chartContainer = document.getElementById('price-chart');
       chart = LightweightCharts.createChart(chartContainer, {{
@@ -191,6 +203,10 @@ def render_dashboard_home_html(snapshot: Dict[str, Any]) -> str:
       setText('portfolio-value-usd', snapshot.portfolio_value_usd);
       setText('active-orders', snapshot.active_orders);
       setText('fills', snapshot.fills);
+      setText('tax-lot-method', snapshot.tax_lots?.method);
+      setText('open-tax-lots', snapshot.tax_lots?.open_lots);
+      const lotSelect = document.getElementById('tax-lot-select');
+      if (lotSelect && snapshot.tax_lots?.method) lotSelect.value = String(snapshot.tax_lots.method).toUpperCase();
       setText('survival-probability', snapshot.risk_metrics?.survival_probability_30d);
       setText('risk-of-ruin', snapshot.risk_metrics?.risk_of_ruin_30d);
 

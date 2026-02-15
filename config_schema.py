@@ -120,6 +120,7 @@ CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"env": "TRAILING_TRIGGER_LEVELS", "attr": "trailing_trigger_levels", "type": "int"},
     {"env": "STATE_DB_PATH", "attr": "state_db_path", "type": "str"},
     {"env": "LEGACY_ORDERS_JSON_ENABLED", "attr": "legacy_orders_json_enabled", "type": "bool"},
+    {"env": "TAX_LOT_METHOD", "attr": "tax_lot_method", "type": "str"},
     {"env": "SAFE_START_ENABLED", "attr": "safe_start_enabled", "type": "bool"},
     {"env": "BASE_BUY_MODE", "attr": "base_buy_mode", "type": "str"},
     {"env": "BASE_BUY_EXECUTION_ALGO", "attr": "base_buy_execution_algo", "type": "str"},
