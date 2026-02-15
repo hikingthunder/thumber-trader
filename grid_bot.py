@@ -20,6 +20,7 @@ import importlib
 import logging
 import math
 import os
+import random
 import signal
 import sqlite3
 import stat
@@ -166,6 +167,16 @@ class BotConfig:
     paper_fill_exceed_pct: Decimal = Decimal(os.getenv("PAPER_FILL_EXCEED_PCT", "0.0001"))
     paper_fill_delay_seconds: int = int(os.getenv("PAPER_FILL_DELAY_SECONDS", "5"))
     paper_slippage_pct: Decimal = Decimal(os.getenv("PAPER_SLIPPAGE_PCT", "0.0001"))
+    execution_rl_enabled: bool = os.getenv("EXECUTION_RL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    execution_rl_algo: str = os.getenv("EXECUTION_RL_ALGO", "dqn").strip().lower()
+    execution_rl_learning_rate: float = float(os.getenv("EXECUTION_RL_LEARNING_RATE", "0.03"))
+    execution_rl_discount: float = float(os.getenv("EXECUTION_RL_DISCOUNT", "0.95"))
+    execution_rl_epsilon: float = float(os.getenv("EXECUTION_RL_EPSILON", "0.15"))
+    execution_rl_min_epsilon: float = float(os.getenv("EXECUTION_RL_MIN_EPSILON", "0.02"))
+    execution_rl_epsilon_decay: float = float(os.getenv("EXECUTION_RL_EPSILON_DECAY", "0.999"))
+    execution_rl_chase_step_bps: Decimal = Decimal(os.getenv("EXECUTION_RL_CHASE_STEP_BPS", "1.5"))
+    execution_rl_max_chase_bps: Decimal = Decimal(os.getenv("EXECUTION_RL_MAX_CHASE_BPS", "12"))
+    execution_rl_update_interval_seconds: int = int(os.getenv("EXECUTION_RL_UPDATE_INTERVAL_SECONDS", "2"))
 
     # local dashboard
     dashboard_enabled: bool = os.getenv("DASHBOARD_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -354,6 +365,49 @@ class StrategyEngine:
         raise NotImplementedError
 
 
+class ExecutionRLAgent:
+    """Lightweight RL execution policy for rest/chase/cancel decisions."""
+
+    ACTION_REST = "REST"
+    ACTION_CHASE = "CHASE"
+    ACTION_CANCEL = "CANCEL"
+
+    def __init__(
+        self,
+        learning_rate: float,
+        discount: float,
+        epsilon: float,
+        min_epsilon: float,
+        epsilon_decay: float,
+    ):
+        self.learning_rate = max(0.0001, float(learning_rate))
+        self.discount = min(0.999, max(0.0, float(discount)))
+        self.epsilon = min(1.0, max(0.0, float(epsilon)))
+        self.min_epsilon = min(1.0, max(0.0, float(min_epsilon)))
+        self.epsilon_decay = min(1.0, max(0.9, float(epsilon_decay)))
+        self._q: Dict[Tuple[str, str], float] = {}
+
+    @staticmethod
+    def actions() -> Tuple[str, str, str]:
+        return (ExecutionRLAgent.ACTION_REST, ExecutionRLAgent.ACTION_CHASE, ExecutionRLAgent.ACTION_CANCEL)
+
+    def select_action(self, state: str) -> str:
+        if random.random() < self.epsilon:
+            return random.choice(self.actions())
+        return max(self.actions(), key=lambda a: self._q.get((state, a), 0.0))
+
+    def update(self, prev_state: str, action: str, reward: float, next_state: str) -> None:
+        current_q = self._q.get((prev_state, action), 0.0)
+        max_next = max(self._q.get((next_state, a), 0.0) for a in self.actions())
+        target = reward + self.discount * max_next
+        self._q[(prev_state, action)] = current_q + self.learning_rate * (target - current_q)
+        self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+
+    def fill_probability(self, state: str) -> float:
+        raw = self._q.get((state, self.ACTION_REST), 0.0)
+        return 1.0 / (1.0 + math.exp(-raw))
+
+
 class GridStrategy(StrategyEngine):
     """Concrete grid strategy implementation for a single product."""
 
@@ -471,6 +525,15 @@ class GridStrategy(StrategyEngine):
         self._dashboard_candles: List[Dict[str, float]] = []
         self._dashboard_candles_refresh_ts = 0.0
         self._dashboard_recent_fills: List[Dict[str, str]] = self._load_recent_fills_for_dashboard(limit=40)
+        self._execution_rl_agent: Optional[ExecutionRLAgent] = None
+        if self.config.execution_rl_enabled:
+            self._execution_rl_agent = ExecutionRLAgent(
+                learning_rate=self.config.execution_rl_learning_rate,
+                discount=self.config.execution_rl_discount,
+                epsilon=self.config.execution_rl_epsilon,
+                min_epsilon=self.config.execution_rl_min_epsilon,
+                epsilon_decay=self.config.execution_rl_epsilon_decay,
+            )
         self._migrate_orders_json_if_needed()
 
     async def run(self) -> None:
@@ -535,6 +598,8 @@ class GridStrategy(StrategyEngine):
                     break
                 if not self._paused:
                     await asyncio.to_thread(self._maybe_roll_grid, current_price)
+                    if self.config.execution_rl_enabled:
+                        await asyncio.to_thread(self._execution_rl_tick, current_price)
                     await asyncio.to_thread(self._process_open_orders, current_price, trend_bias)
                     await asyncio.to_thread(self._save_orders)
                     await asyncio.to_thread(self._record_daily_stats_snapshot, current_price)
@@ -992,6 +1057,89 @@ class GridStrategy(StrategyEngine):
         if side == "SELL" and current_price >= price * (Decimal("1") + exceed):
             return "FILLED"
         return "OPEN"
+
+    def _execution_state_bucket(self, record: Dict[str, Any], current_price: Decimal) -> str:
+        side = str(record.get("side", "")).upper()
+        limit_price = Decimal(str(record.get("price", "0")))
+        age_seconds = max(0.0, time.time() - float(record.get("created_ts", time.time())))
+        age_bucket = "fresh" if age_seconds < self.config.paper_fill_delay_seconds else "stale"
+        if limit_price <= 0 or current_price <= 0:
+            return f"{side}:unknown:{age_bucket}"
+        diff = (current_price - limit_price) / limit_price
+        if side == "BUY":
+            pressure = "favorable" if diff <= Decimal("-0.0005") else ("neutral" if diff <= Decimal("0.0005") else "adverse")
+        else:
+            pressure = "favorable" if diff >= Decimal("0.0005") else ("neutral" if diff >= Decimal("-0.0005") else "adverse")
+        return f"{side}:{pressure}:{age_bucket}"
+
+    def _replace_order_price(self, order_id: str, record: Dict[str, Any], new_price: Decimal) -> Optional[str]:
+        side = str(record["side"]).upper()
+        grid_index = int(record.get("grid_index", 0))
+        base_size = Decimal(str(record["base_size"]))
+
+        self._cancel_single_order(order_id)
+        self.orders.pop(order_id, None)
+
+        if side == "BUY":
+            usd_notional = base_size * new_price
+            return self._place_grid_order(side="BUY", price=new_price, usd_notional=usd_notional, grid_index=grid_index)
+        return self._place_grid_order(side="SELL", price=new_price, base_size=base_size, grid_index=grid_index)
+
+    def _execution_rl_tick(self, current_price: Decimal) -> None:
+        agent = self._execution_rl_agent
+        if agent is None or not self.orders:
+            return
+
+        now = time.time()
+        min_step = self.price_increment if self.price_increment > 0 else Decimal("0.01")
+        chase_step = max(min_step, current_price * self.config.execution_rl_chase_step_bps / Decimal("10000"))
+        max_chase = max(chase_step, current_price * self.config.execution_rl_max_chase_bps / Decimal("10000"))
+
+        for order_id, record in list(self.orders.items()):
+            if str(record.get("product_id", self.config.product_id)) != self.config.product_id:
+                continue
+            last_ts = float(record.get("rl_last_decision_ts", 0.0))
+            if (now - last_ts) < self.config.execution_rl_update_interval_seconds:
+                continue
+
+            prev_state = self._execution_state_bucket(record, current_price)
+            action = agent.select_action(prev_state)
+            reward = 0.0
+
+            if action == ExecutionRLAgent.ACTION_REST:
+                reward += 0.01 * agent.fill_probability(prev_state)
+            elif action == ExecutionRLAgent.ACTION_CANCEL:
+                self._cancel_single_order(order_id)
+                self.orders.pop(order_id, None)
+                reward -= 0.01
+                self._add_event(f"RL canceled {record.get('side')} @ {record.get('price')}")
+            elif action == ExecutionRLAgent.ACTION_CHASE:
+                side = str(record.get("side", "")).upper()
+                current_limit = Decimal(str(record.get("price", "0")))
+                chased_abs = Decimal(str(record.get("rl_chased_abs", "0")))
+                if chased_abs >= max_chase:
+                    reward -= 0.005
+                else:
+                    signed_step = chase_step if side == "BUY" else -chase_step
+                    new_price = self._q_price(current_limit + signed_step)
+                    replacement_id = self._replace_order_price(order_id, record, new_price)
+                    if replacement_id:
+                        replacement = self.orders.get(replacement_id, {})
+                        replacement["rl_chased_abs"] = str(chased_abs + abs(new_price - current_limit))
+                        replacement["rl_last_decision_ts"] = now
+                        replacement["rl_last_state"] = prev_state
+                        replacement["rl_last_action"] = action
+                        reward += 0.005
+                        self._add_event(f"RL chased {side} to {new_price}")
+                    else:
+                        reward -= 0.02
+
+            next_state = self._execution_state_bucket(record, current_price) if order_id in self.orders else f"terminal:{action.lower()}"
+            agent.update(prev_state, action, reward, next_state)
+            if order_id in self.orders:
+                self.orders[order_id]["rl_last_decision_ts"] = now
+                self.orders[order_id]["rl_last_state"] = prev_state
+                self.orders[order_id]["rl_last_action"] = action
 
     def _risk_monitor(self, current_price: Decimal) -> None:
         usd_bal = self._get_available_balance("USD")
@@ -3373,6 +3521,20 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("PAPER_FILL_DELAY_SECONDS must be >= 0")
     if config.paper_fill_exceed_pct < 0 or config.paper_slippage_pct < 0:
         raise ValueError("Paper simulation percentages must be >= 0")
+    if config.execution_rl_algo not in {"dqn", "ppo"}:
+        raise ValueError("EXECUTION_RL_ALGO must be dqn or ppo")
+    if config.execution_rl_learning_rate <= 0:
+        raise ValueError("EXECUTION_RL_LEARNING_RATE must be > 0")
+    if not (0 <= config.execution_rl_discount <= 1):
+        raise ValueError("EXECUTION_RL_DISCOUNT must be in [0,1]")
+    if not (0 <= config.execution_rl_min_epsilon <= config.execution_rl_epsilon <= 1):
+        raise ValueError("EXECUTION_RL_MIN_EPSILON and EXECUTION_RL_EPSILON must satisfy 0 <= min <= epsilon <= 1")
+    if not (0 < config.execution_rl_epsilon_decay <= 1):
+        raise ValueError("EXECUTION_RL_EPSILON_DECAY must be in (0,1]")
+    if config.execution_rl_chase_step_bps <= 0 or config.execution_rl_max_chase_bps <= 0:
+        raise ValueError("EXECUTION_RL_CHASE_STEP_BPS and EXECUTION_RL_MAX_CHASE_BPS must be > 0")
+    if config.execution_rl_update_interval_seconds < 1:
+        raise ValueError("EXECUTION_RL_UPDATE_INTERVAL_SECONDS must be >= 1")
     if not (Decimal("0") < config.max_btc_inventory_pct <= Decimal("1")):
         raise ValueError("MAX_BTC_INVENTORY_PCT must be in (0,1]")
     if not (Decimal("0") < config.inventory_cap_min_pct <= Decimal("1")):
