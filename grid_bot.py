@@ -93,6 +93,12 @@ class BotConfig:
 
     # capital and risk controls
     base_order_notional_usd: Decimal = Decimal(os.getenv("BASE_ORDER_NOTIONAL_USD", "10"))
+    kelly_allocation_enabled: bool = os.getenv("KELLY_ALLOCATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    kelly_refresh_seconds: int = int(os.getenv("KELLY_REFRESH_SECONDS", "900"))
+    kelly_lookback_fills: int = int(os.getenv("KELLY_LOOKBACK_FILLS", "300"))
+    kelly_min_closed_trades: int = int(os.getenv("KELLY_MIN_CLOSED_TRADES", "20"))
+    kelly_min_allocation_frac: Decimal = Decimal(os.getenv("KELLY_MIN_ALLOCATION_FRAC", "0.25"))
+    kelly_max_allocation_frac: Decimal = Decimal(os.getenv("KELLY_MAX_ALLOCATION_FRAC", "2.50"))
     quote_reserve_pct: Decimal = Decimal(os.getenv("QUOTE_RESERVE_PCT", "0.25"))
     max_btc_inventory_pct: Decimal = Decimal(os.getenv("MAX_BTC_INVENTORY_PCT", "0.65"))
     hard_stop_loss_pct: Decimal = Decimal(os.getenv("HARD_STOP_LOSS_PCT", "0.08"))
@@ -302,6 +308,8 @@ class GridBot:
         self._market_regime_source = "ADX"
         self._market_regime_confidence = Decimal("0")
         self._active_inventory_cap_pct = self.config.max_btc_inventory_pct
+        self._capital_allocation_multiplier = Decimal("1")
+        self._capital_allocation_kelly_fraction = Decimal("0")
         self.paper_balances = {
             "USD": self.config.paper_start_usd,
             self.base_currency: self.config.paper_start_base,
@@ -768,7 +776,7 @@ class GridBot:
         base_available = self._get_available_balance(self.base_currency)
         deployable_usd = usd_available * (Decimal("1") - self.config.quote_reserve_pct)
 
-        buy_budget_per_order = self._regime_adjusted_buy_notional(self.config.base_order_notional_usd)
+        buy_budget_per_order = self._regime_adjusted_buy_notional(self._allocated_base_order_notional())
         max_buys = int(deployable_usd // buy_budget_per_order)
         buy_levels = buy_levels[:max_buys] if max_buys >= 0 else []
 
@@ -1122,6 +1130,15 @@ class GridBot:
         if self._market_regime == "RANGING":
             return self.config.adx_range_band_multiplier
         return Decimal("1")
+
+    def set_capital_allocation(self, multiplier: Decimal, kelly_fraction: Decimal) -> None:
+        with self._state_lock:
+            self._capital_allocation_multiplier = max(Decimal("0"), multiplier)
+            self._capital_allocation_kelly_fraction = max(Decimal("0"), kelly_fraction)
+
+    def _allocated_base_order_notional(self) -> Decimal:
+        sized = self.config.base_order_notional_usd * self._capital_allocation_multiplier
+        return max(self.config.min_notional_usd, sized)
 
     def _regime_adjusted_buy_notional(self, usd_notional: Decimal) -> Decimal:
         adjusted = usd_notional
@@ -1691,7 +1708,8 @@ class GridBot:
         new_levels = self.grid_levels[1:] + [self._q_price(self.grid_levels[-1] + step)]
         self.grid_levels = new_levels
         self._reindex_orders_after_shift(direction="up")
-        self._place_grid_order(side="SELL", price=self.grid_levels[-1], base_size=self._q_base(self.config.base_order_notional_usd / self.grid_levels[-1]), grid_index=len(self.grid_levels) - 1)
+        trailing_notional = self._allocated_base_order_notional()
+        self._place_grid_order(side="SELL", price=self.grid_levels[-1], base_size=self._q_base(trailing_notional / self.grid_levels[-1]), grid_index=len(self.grid_levels) - 1)
         self._add_event(f"Trailing roll up -> new top {self.grid_levels[-1]}")
 
     def _roll_grid_down(self, step: Decimal) -> None:
@@ -1703,7 +1721,7 @@ class GridBot:
         new_levels = [self._q_price(self.grid_levels[0] - step)] + self.grid_levels[:-1]
         self.grid_levels = new_levels
         self._reindex_orders_after_shift(direction="down")
-        self._place_grid_order(side="BUY", price=self.grid_levels[0], usd_notional=self.config.base_order_notional_usd, grid_index=0)
+        self._place_grid_order(side="BUY", price=self.grid_levels[0], usd_notional=self._allocated_base_order_notional(), grid_index=0)
         self._add_event(f"Trailing roll down -> new bottom {self.grid_levels[0]}")
 
     def _find_order_by_grid_index_and_side(self, grid_index: int, side: str) -> Optional[str]:
@@ -1777,6 +1795,8 @@ class GridBot:
                 "balances": {"USD": str(usd_bal), self.base_currency: str(base_bal)},
                 "portfolio_value_usd": str(portfolio),
                 "inventory_cap_pct": str(self._effective_inventory_cap_pct()),
+                "capital_allocation_multiplier": str(self._capital_allocation_multiplier),
+                "kelly_fraction": str(self._capital_allocation_kelly_fraction),
                 "trend_strength": str(self._cached_trend_strength),
                 "adx": str(self._cached_adx),
                 "market_regime": self._market_regime,
@@ -2452,6 +2472,14 @@ def _validate_config(config: BotConfig) -> None:
         raise ValueError("HMM_MIN_VARIANCE must be > 0")
     if config.base_order_notional_usd <= 0:
         raise ValueError("BASE_ORDER_NOTIONAL_USD must be > 0")
+    if config.kelly_refresh_seconds < 30:
+        raise ValueError("KELLY_REFRESH_SECONDS must be >= 30")
+    if config.kelly_lookback_fills < 20:
+        raise ValueError("KELLY_LOOKBACK_FILLS must be >= 20")
+    if config.kelly_min_closed_trades < 1:
+        raise ValueError("KELLY_MIN_CLOSED_TRADES must be >= 1")
+    if not (Decimal("0") < config.kelly_min_allocation_frac <= config.kelly_max_allocation_frac):
+        raise ValueError("KELLY_MIN_ALLOCATION_FRAC and KELLY_MAX_ALLOCATION_FRAC must satisfy 0 < min <= max")
     if config.min_notional_usd <= 0:
         raise ValueError("MIN_NOTIONAL_USD must be > 0")
     if not (Decimal("0") <= config.quote_reserve_pct < Decimal("1")):
@@ -3005,9 +3033,112 @@ class GridManager:
         else:
             self._shared_risk_state.set_portfolio_beta(Decimal("0"))
 
+    def _compute_kelly_fraction(self, engine: GridBot) -> Optional[Decimal]:
+        with engine._db_lock:
+            rows = engine._db.execute(
+                """
+                SELECT side, price, base_size, fee_paid
+                FROM fills
+                WHERE product_id = ?
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (engine.config.product_id, int(self.config.kelly_lookback_fills)),
+            ).fetchall()
+
+        if not rows:
+            return None
+
+        fills = list(reversed(rows))
+        open_buys: List[Tuple[Decimal, Decimal]] = []
+        closed_results: List[Decimal] = []
+
+        for side, price_raw, base_raw, fee_raw in fills:
+            side_u = str(side).upper()
+            price = Decimal(str(price_raw))
+            base_size = Decimal(str(base_raw))
+            fee_paid = Decimal(str(fee_raw))
+            if price <= 0 or base_size <= 0:
+                continue
+
+            notional = price * base_size
+            if side_u == "BUY":
+                open_buys.append((base_size, notional + fee_paid))
+                continue
+            if side_u != "SELL":
+                continue
+
+            sell_remaining = base_size
+            sell_proceeds = notional - fee_paid
+            matched_cost = Decimal("0")
+            matched_proceeds = Decimal("0")
+
+            while sell_remaining > 0 and open_buys:
+                buy_base, buy_cost = open_buys[0]
+                if buy_base <= 0:
+                    open_buys.pop(0)
+                    continue
+                matched = min(sell_remaining, buy_base)
+                ratio = matched / buy_base
+                cost_alloc = buy_cost * ratio
+                proceeds_alloc = sell_proceeds * (matched / base_size)
+                matched_cost += cost_alloc
+                matched_proceeds += proceeds_alloc
+                sell_remaining -= matched
+                leftover_base = buy_base - matched
+                leftover_cost = buy_cost - cost_alloc
+                if leftover_base > 0:
+                    open_buys[0] = (leftover_base, leftover_cost)
+                else:
+                    open_buys.pop(0)
+
+            if matched_cost > 0:
+                closed_results.append(matched_proceeds - matched_cost)
+
+        if len(closed_results) < self.config.kelly_min_closed_trades:
+            return None
+
+        wins = [x for x in closed_results if x > 0]
+        losses = [x for x in closed_results if x < 0]
+        if not wins or not losses:
+            return None
+
+        p = Decimal(len(wins)) / Decimal(len(closed_results))
+        avg_win = sum(wins, Decimal("0")) / Decimal(len(wins))
+        avg_loss = sum((-x for x in losses), Decimal("0")) / Decimal(len(losses))
+        if avg_loss <= 0:
+            return None
+
+        r = avg_win / avg_loss
+        if r <= 0:
+            return None
+
+        kelly = (p * (r + Decimal("1")) - Decimal("1")) / r
+        return max(Decimal("0"), kelly)
+
+    def _refresh_kelly_allocations(self) -> None:
+        if not self.config.kelly_allocation_enabled:
+            for engine in self.engines:
+                engine.set_capital_allocation(Decimal("1"), Decimal("0"))
+            return
+
+        for engine in self.engines:
+            kelly_fraction = self._compute_kelly_fraction(engine)
+            if kelly_fraction is None:
+                engine.set_capital_allocation(Decimal("1"), Decimal("0"))
+                continue
+
+            multiplier = max(self.config.kelly_min_allocation_frac, min(kelly_fraction, self.config.kelly_max_allocation_frac))
+            engine.set_capital_allocation(multiplier, kelly_fraction)
+
     async def _cross_asset_risk_loop(self) -> None:
+        kelly_next_refresh = 0.0
         while any(engine._running for engine in self.engines):
             await asyncio.to_thread(self._refresh_cross_asset_risk)
+            now = time.time()
+            if now >= kelly_next_refresh:
+                await asyncio.to_thread(self._refresh_kelly_allocations)
+                kelly_next_refresh = now + max(30, self.config.kelly_refresh_seconds)
             await asyncio.sleep(max(5, self.config.cross_asset_refresh_seconds))
 
     async def run(self) -> None:
