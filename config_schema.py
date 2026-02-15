@@ -95,6 +95,8 @@ CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"env": "DASHBOARD_ENABLED", "attr": "dashboard_enabled", "type": "bool"},
     {"env": "DASHBOARD_HOST", "attr": "dashboard_host", "type": "str"},
     {"env": "DASHBOARD_PORT", "attr": "dashboard_port", "type": "int"},
+    {"env": "DASHBOARD_AUTH_TOKEN", "attr": "dashboard_auth_token", "type": "str"},
+    {"env": "DASHBOARD_MAX_REQUEST_BYTES", "attr": "dashboard_max_request_bytes", "type": "int"},
     {"env": "PROMETHEUS_ENABLED", "attr": "prometheus_enabled", "type": "bool"},
     {"env": "PROMETHEUS_PATH", "attr": "prometheus_path", "type": "str"},
     {"env": "TRAILING_GRID_ENABLED", "attr": "trailing_grid_enabled", "type": "bool"},
