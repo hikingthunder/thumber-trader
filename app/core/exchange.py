@@ -200,7 +200,6 @@ class CoinbaseExchange:
 
     async def get_market_trades(self, product_id: str, limit: int = 50) -> List[Dict[str, Any]]:
          # Similar implementation for trades if needed
-         # Original code used: https://api.exchange.coinbase.com/products/{product_id}/trades
          url = f"https://api.exchange.coinbase.com/products/{product_id}/trades"
          
          def _fetch():
@@ -214,4 +213,37 @@ class CoinbaseExchange:
          except Exception as e:
             logging.warning(f"Failed to fetch trades: {e}")
             return []
+
+    async def get_external_price(self, exchange: str, symbol: str) -> Optional[Decimal]:
+        """Fetch price from external exchanges using public REST APIs."""
+        urls = {
+            "binance": f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.replace('-', '')}",
+            "kraken": f"https://api.kraken.com/0/public/Ticker?pair={symbol.replace('-', '')}",
+            "bybit": f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol.replace('-', '')}"
+        }
+        
+        url = urls.get(exchange.lower())
+        if not url:
+            return None
+
+        def _fetch():
+            req = urllib.request.Request(url, headers={"User-Agent": "thumber-trader/2.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        try:
+            data = await self._run_async(_fetch)
+            if exchange == "binance":
+                return Decimal(str(data["price"]))
+            elif exchange == "kraken":
+                # Kraken returns a dict with 'result' containing the pair key
+                result = data.get("result", {})
+                pair_key = list(result.keys())[0]
+                return Decimal(str(result[pair_key]["c"][0]))
+            elif exchange == "bybit":
+                result = data.get("result", {}).get("list", [{}])[0]
+                return Decimal(str(result.get("lastPrice", 0)))
+        except Exception as e:
+            logging.warning(f"Failed to fetch {exchange} price for {symbol}: {e}")
+            return None
 

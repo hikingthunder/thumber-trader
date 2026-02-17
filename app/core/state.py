@@ -100,6 +100,22 @@ class SharedRiskState:
         with self.lock:
             self.black_litterman_views[product_id] = value
 
-    def get_black_litterman_view(self, product_id: str) -> Optional[Decimal]:
+    async def acquire_ha_lock(self, instance_id: str, lease_seconds: int) -> bool:
+        """Attempt to acquire or renew the HA master lock."""
+        now = time.time()
         with self.lock:
-            return self.black_litterman_views.get(product_id)
+            current_lock = getattr(self, "_ha_lock", None)
+            if current_lock is None or current_lock["expiry"] < now or current_lock["id"] == instance_id:
+                self._ha_lock = {"id": instance_id, "expiry": now + lease_seconds}
+                return True
+            return False
+
+    def is_ha_master(self, instance_id: str) -> bool:
+        """Check if this instance is currently the HA master."""
+        now = time.time()
+        with self.lock:
+            current_lock = getattr(self, "_ha_lock", None)
+            return current_lock is not None and current_lock["id"] == instance_id and current_lock["expiry"] > now
+
+# Global imports needed for SharedRiskState if used
+import time

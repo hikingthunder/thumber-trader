@@ -4,10 +4,15 @@ Thumber Trader is a high-frequency, adaptive grid trading bot designed for Coinb
 
 ## 🚀 Key Features
 
-- **Modular FastAPI Architecture**: High-performance backend with an HTMX-powered web dashboard.
-- **Arithmetic Grid Engine**: Reliable grid trading with arithmetic spacing.
-- **Basic Analysis**: Integrated RSI and EMA indicators for market context.
-- **Tax-Ready Logging**: SQLite persistence with FIFO tax lot matching for reporting.
+- **Modular FastAPI Architecture**: High-performance backend with an HTMX-powered dashboard.
+- **Adaptive Grid Engine**: Supports **Arithmetic & Geometric** spacing with **ATR-based** dynamic volatility bands.
+- **Alpha Fusion**: Blends **RSI and MACD** signals for intelligent entry/exit and sizing.
+- **Risk management**: Includes **Kelly Criterion** sizing and global **Hard Stop-Loss**.
+- **Market Sentiment & Toxicity**: **VPIN** algorithm to detect toxic flow and widen bands.
+- **Multi-Venue Pricing**: Consensus pricing from **Binance, Kraken, and Bybit**.
+- **High Availability**: Active-Passive failover with database-backed master election.
+- **Tax-Ready Logging**: **FIFO, LIFO, and HIFO** matching with real-time PnL tracking.
+- **Metrics**: Prometheus-compatible `/metrics` endpoint.
 
 ## 🛠 Prerequisites
 

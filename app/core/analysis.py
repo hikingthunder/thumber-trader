@@ -431,3 +431,49 @@ def survival_probability(
         "risk_of_ruin_probability": ruin_probability,
         "inventory_skew": inventory_skew,
     }
+
+def vpin(
+    volumes: List[Decimal], 
+    price_changes: List[Decimal], 
+    bucket_count: int = 50
+) -> Decimal:
+    """
+    Calculate Volume-Synchronized Probability of Informed Trading (VPIN).
+    Simplified version using candle-based volume buckets.
+    """
+    if len(volumes) < bucket_count or len(price_changes) < bucket_count:
+        return Decimal("0.5")
+    
+    # Calculate Order Imbalance relative to total volume
+    # In a simplified version, we use price direction as a proxy for trade direction
+    imbalances = []
+    for v, dp in zip(volumes[-bucket_count:], price_changes[-bucket_count:]):
+        # If price went up, assume mostly buy volume, etc.
+        # This is a crude proxy for actual trade-by-trade imbalance
+        if dp > 0:
+            imbalances.append(v) # Buy imbalance
+        elif dp < 0:
+            imbalances.append(-v) # Sell imbalance
+        else:
+            imbalances.append(Decimal("0"))
+
+    total_volume = sum(volumes[-bucket_count:], Decimal("0"))
+    if total_volume <= 0:
+        return Decimal("0.5")
+        
+    abs_imbalance = sum([abs(i) for i in imbalances], Decimal("0"))
+    return abs_imbalance / total_volume
+
+def calculate_geometric_levels(
+    lower: Decimal, 
+    upper: Decimal, 
+    n: int
+) -> List[Decimal]:
+    """Calculate n levels geometrically spaced between lower and upper."""
+    if n < 2 or lower >= upper or lower <= 0:
+        return []
+    
+    # r = (upper/lower)^(1/(n-1)) - 1
+    ratio = Decimal(str(math.pow(float(upper / lower), 1.0 / (n - 1))))
+    levels = [lower * (ratio ** i) for i in range(n)]
+    return levels

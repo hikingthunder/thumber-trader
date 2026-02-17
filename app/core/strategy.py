@@ -50,6 +50,16 @@ class GridStrategy(StrategyEngine):
         
         while self.running:
             try:
+                # 0. HA Check (Persistent via DB)
+                if settings.ha_failover_enabled:
+                    is_master = await self._acquire_ha_lock_db()
+                    if not is_master:
+                        logger.debug(f"HA: STANDBY mode for {settings.ha_instance_id}. Sleeping.")
+                        await asyncio.sleep(settings.ha_standby_sleep_seconds)
+                        continue
+                    else:
+                        logger.debug(f"HA: MASTER mode for {settings.ha_instance_id}.")
+
                 loop_start = time.time()
                 
                 # 1. Update Market Data
@@ -99,10 +109,34 @@ class GridStrategy(StrategyEngine):
             logger.info(f"Loaded {len(self.orders)} active orders from database.")
 
     async def _update_market_data(self):
-        """Fetch latest price and candles."""
+        """Fetch latest price and candles with optional consensus pricing."""
         try:
-            self.last_price = await self.exchange.get_current_price(self.product_id)
-            # Fetch enough candles for indicators (e.g. RSI 14, EMA 200)
+            cb_price = await self.exchange.get_current_price(self.product_id)
+            self.last_price = cb_price
+            
+            # Consensus Pricing
+            if settings.consensus_pricing_enabled:
+                external_prices = []
+                exchanges = settings.consensus_exchanges.split(",")
+                for ex in exchanges:
+                    if ex.strip().lower() == "coinbase":
+                        continue
+                    p = await self.exchange.get_external_price(ex.strip(), self.product_id)
+                    if p:
+                        external_prices.append(p)
+                
+                if external_prices:
+                    avg_external = sum(external_prices) / len(external_prices)
+                    # Check deviation
+                    deviation = abs(cb_price - avg_external) / avg_external
+                    if deviation > settings.consensus_max_deviation_pct:
+                        logger.warning(f"Consensus price deviation too high ({deviation*100:.2f}%). Using average external price: {avg_external}")
+                        self.last_price = avg_external
+                    else:
+                        # Blend consensus (weighted 50/50 for now)
+                        self.last_price = (cb_price + avg_external) / 2
+
+            # Fetch candles
             self.candles = await self.exchange.fetch_public_candles(
                 self.product_id, 
                 granularity=settings.trend_candle_granularity,
@@ -211,11 +245,17 @@ class GridStrategy(StrategyEngine):
                     sell_size = Decimal(order["base_size"])
                     sell_price = Decimal(order["price"])
                     
-                    # Fetch open lots (oldest first)
+                    # Fetch open lots based on tax lot method
+                    order_by = TaxLot.acquired_ts.asc() # Default FIFO
+                    if settings.tax_lot_method == "LIFO":
+                        order_by = TaxLot.acquired_ts.desc()
+                    elif settings.tax_lot_method == "HIFO":
+                        order_by = TaxLot.buy_price.desc()
+                    
                     stmt = select(TaxLot).where(
                         TaxLot.product_id == self.product_id,
                         TaxLot.remaining_base_size != "0"
-                    ).order_by(TaxLot.acquired_ts.asc())
+                    ).order_by(order_by)
                     
                     open_lots = (await session.execute(stmt)).scalars().all()
                     
@@ -383,43 +423,126 @@ class GridStrategy(StrategyEngine):
              elif diff_pct < -settings.trend_strength_threshold:
                   trend = "DOWN"
         
-        logger.debug(f"Analysis: RSI={rsi_val:.2f}, Trend={trend}")
+        # MACD
+        macd_hist = analysis.macd_histogram(
+            closes, 
+            settings.alpha_macd_fast, 
+            settings.alpha_macd_slow, 
+            settings.alpha_macd_signal
+        )
+        
+        # ATR
+        atr_val = analysis.atr(self.candles, settings.atr_period)
+        
+        # VPIN (Order Flow Toxicity)
+        volumes = [c[4] for c in self.candles]
+        price_changes = [(c[3] - self.candles[i-1][3]) if i > 0 else Decimal("0") for i, c in enumerate(self.candles)]
+        vpin_val = analysis.vpin(volumes, price_changes, settings.vpin_rolling_buckets)
+
+        logger.debug(f"Analysis: RSI={rsi_val:.2f}, Trend={trend}, ATR={atr_val}, MACD_Hist={macd_hist:.4f}, VPIN={vpin_val:.2f}")
         return {
              "rsi": rsi_val,
              "trend": trend,
+             "atr": atr_val,
+             "macd_hist": macd_hist,
+             "vpin": vpin_val,
              "price": self.last_price
         }
 
+    def _calculate_grid_levels(self, mid_price: Decimal, band_pct: Decimal) -> List[Decimal]:
+        """Calculate grid levels based on spacing mode."""
+        upper = mid_price * (1 + band_pct)
+        lower = mid_price * (1 - band_pct)
+        
+        if settings.grid_spacing_mode == "geometric":
+            return analysis.calculate_geometric_levels(lower, upper, settings.grid_lines)
+        else: # arithmetic
+            step = (upper - lower) / (settings.grid_lines - 1)
+            return [lower + (step * i) for i in range(settings.grid_lines)]
+
     async def _execute_grid_logic(self, metrics: Dict[str, Any]):
         """Main decision loop for initial placement or rebalancing logic."""
-        # If no orders exist, we might need to initialize the grid (First Run)
+        if not settings.alpha_fusion_enabled:
+             # Fallback to basic grid if alpha fusion disabled
+             return await self._execute_basic_grid_logic(metrics)
+
+        # Alpha Fusion logic
+        rsi = metrics.get("rsi", Decimal("50"))
+        macd_hist = metrics.get("macd_hist", Decimal("0"))
+        
+        # Scoring: Combine RSI and MACD for a sentiment score [-1, 1]
+        # RSI < 30 is bullish (oversold), RSI > 70 is bearish (overbought)
+        rsi_score = (Decimal("50") - rsi) / Decimal("20") # bull if > 1, bear if < -1 roughly
+        macd_score = macd_hist / (self.last_price * Decimal("0.001")) # scale macd
+        
+        sentiment = (rsi_score * settings.alpha_weight_rsi + macd_score * settings.alpha_weight_macd).quantize(Decimal("0.01"))
+        
+        # Dynamic Sizing with Kelly Criterion
+        base_notional = settings.base_order_notional_usd
+        if settings.kelly_allocation_enabled:
+             # Basic implementation: scale size by sentiment and Kelly fraction
+             # In a real bot, we'd use historical win rate/ratios from DB
+             kelly_frac = settings.kelly_min_allocation_frac + (abs(sentiment) * (settings.kelly_max_allocation_frac - settings.kelly_min_allocation_frac))
+             base_notional = base_notional * kelly_frac
+             logger.debug(f"Kelly Adjusted Notional: {base_notional:.2f} USD (Frac={kelly_frac:.2f})")
+
+        # Update dynamic bands if ATR is enabled
+        current_band_pct = settings.grid_band_pct
+        if settings.atr_enabled:
+             atr_val = metrics.get("atr", Decimal("0"))
+             if atr_val > 0 and self.last_price > 0:
+                  atr_band = (atr_val * settings.atr_band_multiplier) / self.last_price
+                  current_band_pct = max(settings.atr_min_band_pct, min(settings.atr_max_band_pct, atr_band))
+
+        # Widen bands if VPIN indicates high toxicity
+        if settings.vpin_enabled:
+             vpin_val = metrics.get("vpin", Decimal("0"))
+             if vpin_val > settings.vpin_threshold_percentile: # threshold used as absolute for now
+                  current_band_pct = current_band_pct * settings.vpin_widen_band_multiplier
+                  logger.warning(f"High Toxicity detected (VPIN={vpin_val:.2f}). Widening bands to {current_band_pct*100:.2f}%")
+
+        # Sentiment Overrides
+        if settings.sentiment_override_enabled:
+             # This would typically fetch from settings.sentiment_source_url
+             # For now, we'll use a placeholder or log the intent
+             logger.debug("Sentiment overrides enabled but external source not implemented. Using Alpha Fusion.")
+
+        # Initial Grid Placement
         if not self.orders and self.running and self.last_price > 0:
-             # Only verify checks and place if we intentionally want to start fresh 
-             # (e.g. if DB was empty). 
-             # For safety, manual trigger or explicit config required usually?
-             # For this refactor, we'll assume if empty & auto-start enabled -> place grid
-             
-             # Calculate levels
              mid_price = self.last_price
-             # Create a simple arithmetic grid around mid_price
-             upper = mid_price * (1 + settings.grid_band_pct)
-             lower = mid_price * (1 - settings.grid_band_pct)
-             step = (upper - lower) / (settings.grid_lines - 1)
+             self.grid_levels = self._calculate_grid_levels(mid_price, current_band_pct)
              
-             self.grid_levels = [lower + (step * i) for i in range(settings.grid_lines)]
+             logger.info(f"Initializing {settings.grid_spacing_mode.capitalize()} Grid with Alpha Fusion (Sentiment: {sentiment})")
              
-             logger.info(f"Initializing Grid: {self.grid_levels[0]:.2f} to {self.grid_levels[-1]:.2f}")
-             
-             # Place initial orders
              for i, level in enumerate(self.grid_levels):
-                  # Determine side: Sell above mid, Buy below mid
-                  # But typically grid bot places orders at all levels except current?
-                  if level > mid_price * Decimal("1.001"): # Slightly above loop
+                  # Bias placement based on sentiment: tilt grid towards buy/sell
+                  if level > mid_price * (Decimal("1.001") - sentiment * Decimal("0.005")): 
                        side = "SELL"
-                       # Calculate size based on balance/config
+                       size = (base_notional / level)
+                       await self._place_limit_order(side, level, size, i)
+                  elif level < mid_price * (Decimal("0.999") - sentiment * Decimal("0.005")): 
+                       side = "BUY"
+                       size = (base_notional / level)
+                       await self._place_limit_order(side, level, size, i)
+
+    async def _execute_basic_grid_logic(self, metrics: Dict[str, Any]):
+        """Legacy/Basic grid logic for when alpha fusion is disabled."""
+        current_band_pct = settings.grid_band_pct
+        if settings.atr_enabled:
+             atr_val = metrics.get("atr", Decimal("0"))
+             if atr_val > 0 and self.last_price > 0:
+                  atr_band = (atr_val * settings.atr_band_multiplier) / self.last_price
+                  current_band_pct = max(settings.atr_min_band_pct, min(settings.atr_max_band_pct, atr_band))
+
+        if not self.orders and self.running and self.last_price > 0:
+             mid_price = self.last_price
+             self.grid_levels = self._calculate_grid_levels(mid_price, current_band_pct)
+             for i, level in enumerate(self.grid_levels):
+                  if level > mid_price * Decimal("1.001"): 
+                       side = "SELL"
                        size = (settings.base_order_notional_usd / level)
                        await self._place_limit_order(side, level, size, i)
-                  elif level < mid_price * Decimal("0.999"): # Slightly below loop
+                  elif level < mid_price * Decimal("0.999"): 
                        side = "BUY"
                        size = (settings.base_order_notional_usd / level)
                        await self._place_limit_order(side, level, size, i)
@@ -460,5 +583,62 @@ class GridStrategy(StrategyEngine):
 
     async def _check_risk_parameters(self):
         """Global risk checks."""
-        pass
+        # 1. Hard Stop-Loss Check
+        stats = await self.get_stats()
+        unrealized_pnl = stats["unrealized_pnl"]
+        inventory_base = stats["inventory_base"]
+        
+        if inventory_base > 0 and self.last_price > 0:
+            total_value = inventory_base * self.last_price
+            if total_value > 0:
+                pnl_pct = unrealized_pnl / total_value
+                if pnl_pct < -settings.hard_stop_loss_pct:
+                    logger.warning(f"CRITICAL: Hard Stop-Loss reached ({pnl_pct*100:.2f}% < -{settings.hard_stop_loss_pct*100:.2f}%). Stopping strategy and canceling all orders.")
+                    self.stop()
+                    # Cancel all open orders for this product
+                    order_ids = list(self.active_order_ids)
+                    if order_ids:
+                        await self.exchange.cancel_orders(order_ids)
+                        # TODO: Market sell inventory if required?
 
+    def stop(self):
+        """Signal the strategy loop to stop."""
+        self.running = False
+
+    async def _acquire_ha_lock_db(self) -> bool:
+        """Acquire or renew the HA master lock in the database."""
+        try:
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    # Check if lock exists
+                    from app.database.models import HALock
+                    stmt = select(HALock).where(HALock.lock_name == "master")
+                    lock = (await session.execute(stmt)).scalar_one_or_none()
+                    
+                    now = time.time()
+                    instance_id = settings.ha_instance_id
+                    lease = settings.ha_lock_lease_seconds
+                    
+                    if not lock:
+                        # Create new lock
+                        lock = HALock(
+                            lock_name="master",
+                            holder_id=instance_id,
+                            lease_expires_ts=now + lease,
+                            holder_ws_sequence_ts=now,
+                            updated_ts=now
+                        )
+                        session.add(lock)
+                        return True
+                    
+                    # Check if existing lock is expired or held by us
+                    if lock.lease_expires_ts < now or lock.holder_id == instance_id:
+                        lock.holder_id = instance_id
+                        lock.lease_expires_ts = now + lease
+                        lock.updated_ts = now
+                        return True
+                    
+                    return False
+        except Exception as e:
+            logger.error(f"Failed to acquire HA lock from DB: {e}")
+            return False

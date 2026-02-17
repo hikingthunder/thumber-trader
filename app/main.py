@@ -64,3 +64,36 @@ app.include_router(web_router)
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "manager_running": manager.running}
+
+@app.get("/metrics")
+async def metrics():
+    """
+    Expose bot metrics in Prometheus format.
+    Simplified version without external prometheus_client dependency.
+    """
+    if not settings.prometheus_enabled:
+        return ""
+    
+    stats = await manager.get_global_stats()
+    lines = [
+        "# HELP thumber_trader_running Boolean if manager is running",
+        "# TYPE thumber_trader_running gauge",
+        f"thumber_trader_running {1 if stats['running'] else 0}",
+        
+        "# HELP thumber_trader_pnl_realized_usd Realized PnL in USD",
+        "# TYPE thumber_trader_pnl_realized_usd gauge",
+        f"thumber_trader_pnl_realized_usd {stats['total_realized_pnl']}",
+        
+        "# HELP thumber_trader_pnl_unrealized_usd Unrealized PnL in USD",
+        "# TYPE thumber_trader_pnl_unrealized_usd gauge",
+        f"thumber_trader_pnl_unrealized_usd {stats['total_unrealized_pnl']}"
+    ]
+    
+    for pid, s_stats in stats["strategies"].items():
+        lines.extend([
+            f'thumber_trader_strategy_orders_count{{product_id="{pid}"}} {s_stats["orders_count"]}',
+            f'thumber_trader_strategy_last_price{{product_id="{pid}"}} {s_stats["last_price"]}',
+            f'thumber_trader_strategy_inventory_base{{product_id="{pid}"}} {s_stats["inventory_base"]}'
+        ])
+        
+    return "\n".join(lines) + "\n"
