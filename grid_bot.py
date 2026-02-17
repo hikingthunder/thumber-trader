@@ -2958,21 +2958,48 @@ class GridStrategy(StrategyEngine):
         return redacted
 
     def _resolve_env_path(self, requested_path: str) -> Path:
-        raw_path = requested_path.strip() or ".env"
-        candidate = Path(raw_path).expanduser()
-        resolved = candidate.resolve(strict=False)
+        # Normalize user-supplied path to a simple filename and confine it to a
+        # dedicated configuration directory under the repo root. This avoids
+        # directory traversal and prevents overwriting arbitrary files.
+        raw = (requested_path or "").strip()
+        # If nothing was provided, use the default ".env" filename.
+        if not raw:
+            raw = ".env"
+        # Collapse any user-supplied directory components; we only allow a filename.
+        filename = os.path.basename(raw)
+        if not filename:
+            raise ValueError("env_path must not be empty")
+        # Basic filename validation: disallow path separators and only allow a small
+        # set of safe characters in the name.
+        if any(sep in filename for sep in (os.sep, os.path.altsep) if sep):
+            raise ValueError("env_path must not contain directory separators")
+        # Very conservative character allow-list for the base name.
+        allowed_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        if not set(filename).issubset(allowed_chars):
+            raise ValueError("env_path contains invalid characters")
+
         repo_root = Path.cwd().resolve()
-        allowed_roots = [repo_root]
-        bot_env_override = os.getenv("BOT_ENV_PATH")
-        if bot_env_override:
-            override_path = Path(bot_env_override).expanduser().resolve(strict=False)
-            if override_path == repo_root or repo_root in override_path.parents:
-                allowed_roots.append(override_path)
-        for root in allowed_roots:
-            if resolved == root or root in resolved.parents:
-                if resolved.is_dir() or resolved.suffix in {".py", ".pyc", ".pyo"}:
-                    raise ValueError("env_path cannot be a directory or a Python file")
-                return resolved
+        config_root = (repo_root / ".env.d").resolve()
+        # Ensure the configuration directory exists.
+        config_root.mkdir(parents=True, exist_ok=True)
+
+        candidate = (config_root / filename)
+        resolved = candidate.resolve(strict=False)
+
+        # Verify the resolved path is still within the dedicated config_root.
+        try:
+            # Python 3.9+: use is_relative_to if available.
+            is_relative = resolved.is_relative_to(config_root)  # type: ignore[attr-defined]
+        except AttributeError:
+            # Fallback for older Python versions.
+            is_relative = config_root in resolved.parents or resolved == config_root
+        if not is_relative:
+            raise ValueError("env_path must be within the configuration directory")
+
+        if resolved.is_dir() or resolved.suffix in {".py", ".pyc", ".pyo"}:
+            raise ValueError("env_path cannot be a directory or a Python file")
+
+        return resolved
 
     def _start_dashboard_server(self) -> None:
         bot = self
