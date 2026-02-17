@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+aiosqlite
+pydantic-settings
+jinja2
+python-multipart
+coinbase-advanced-py

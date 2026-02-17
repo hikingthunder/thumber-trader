@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block content %}
+<header>
+    <div>
+        <h1>Thumber Trader</h1>
+        <div style="font-size: 0.9rem; color: #94a3b8;">
+            Product: <span style="color: white;">{{ product_id }}</span> |
+            Mode: <span style="color: {{ 'orange' if paper_trading else 'white' }};">
+                {{ 'PAPER TRADING' if paper_trading else 'LIVE' }}
+            </span>
+        </div>
+    </div>
+
+    <nav>
+        <a href="/">Dashboard</a>
+        <a href="/config">Configuration</a>
+    </nav>
+    <div id="controls">
+        <button class="btn btn-success" hx-post="/dashboard/control/start" hx-target="#stats-widget">Start</button>
+        <button class="btn btn-danger" hx-post="/dashboard/control/stop" hx-target="#stats-widget">Stop</button>
+    </div>
+</header>
+
+<main class="dashboard-grid">
+    <!-- Stats Widget -->
+    <div id="stats-widget" class="card" hx-get="/dashboard/stats" hx-trigger="load, every 2s">
+        <!-- Initial Content Loading... -->
+        <p>Loading stats...</p>
+    </div>
+
+    <!-- Active Orders Widget -->
+    <div class="card" style="grid-column: span 2;">
+        <h2>Active Orders</h2>
+        <div id="orders-widget" hx-get="/dashboard/orders" hx-trigger="load, every 2s">
+            <p>Loading orders...</p>
+        </div>
+    </div>
+</main>
+{% endblock %}

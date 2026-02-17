@@ -1,0 +1,41 @@
+<div>
+    <div style="margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <strong>Status:</strong>
+            <span class="status-badge {{ 'status-active' if running else 'status-inactive' }}">
+                {{ 'RUNNING' if running else 'STOPPED' }}
+            </span>
+        </div>
+        <div style="text-align: right;">
+            <div style="font-size: 1.5rem; font-weight: bold;">{{ last_price }} <span
+                    style="font-size: 0.8rem; color: #94a3b8;">USD</span></div>
+        </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+        <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px;">
+            <div style="font-size: 0.75rem; color: #94a3b8;">Unrealized PnL</div>
+            <div style="font-size: 1.1rem; color: {{ '#10b981' if unrealized_pnl|float >= 0 else '#ef4444' }};">
+                {{ "+" if unrealized_pnl|float > 0 else "" }}{{ unrealized_pnl }}
+            </div>
+        </div>
+        <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px;">
+            <div style="font-size: 0.75rem; color: #94a3b8;">Realized PnL (Session)</div>
+            <div style="font-size: 1.1rem; color: {{ '#10b981' if realized_pnl|float >= 0 else '#ef4444' }};">
+                {{ "+" if realized_pnl|float > 0 else "" }}{{ realized_pnl }}
+            </div>
+        </div>
+    </div>
+
+    <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; margin-bottom: 10px;">
+        <div style="font-size: 0.75rem; color: #94a3b8; margin-bottom: 4px;">Wallet Balance</div>
+        <div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+            <span>{{ quote_bal }} {{ quote_currency }}</span>
+            <span>{{ base_bal }} {{ base_currency }}</span>
+        </div>
+    </div>
+
+    <div style="font-size: 0.8rem; color: #94a3b8; text-align: right;">
+        Active Orders: <span style="color: white;">{{ orders_count }}</span>
+    </div>
+</div>

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block content %}
+<header>
+    <h1>Configuration</h1>
+    <a href="/" class="btn" style="background-color: transparent; border: 1px solid var(--border-color);">Back to
+        Dashboard</a>
+</header>
+
+<main>
+    <div class="card" style="max-width: 600px; margin: 0 auto;">
+
+        {% if message %}
+        <div style="padding: 10px; border-radius: 6px; margin-bottom: 20px; 
+            background-color: {{ 'rgba(16, 185, 129, 0.2)' if success else 'rgba(239, 68, 68, 0.2)' }};
+            color: {{ '#10b981' if success else '#ef4444' }}; border: 1px solid currentColor;">
+            {{ message }}
+        </div>
+        {% endif %}
+
+        <form method="post" action="/config">
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; color: #94a3b8;">Coinbase API Key</label>
+                <input type="text" name="coinbase_api_key" value="{{ api_key_val }}"
+                    style="width: 100%; padding: 10px; background: #0f172a; border: 1px solid var(--border-color); color: white; border-radius: 6px;">
+            </div>
+
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; color: #94a3b8;">Coinbase API Secret / Private
+                    Key</label>
+                <textarea name="coinbase_api_secret"
+                    placeholder="-----BEGIN EC PRIVATE KEY-----&#10;...&#10;-----END EC PRIVATE KEY-----"
+                    style="width: 100%; height: 120px; padding: 10px; background: #0f172a; border: 1px solid var(--border-color); color: white; border-radius: 6px; font-family: monospace;"></textarea>
+                <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">Paste the full Private Key (PEM format)
+                    or legacy API Secret here. Leave blank to keep unchanged.</div>
+            </div>
+
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; color: #94a3b8;">Product ID</label>
+                <input type="text" name="product_id" value="{{ settings.product_id }}"
+                    style="width: 100%; padding: 10px; background: #0f172a; border: 1px solid var(--border-color); color: white; border-radius: 6px;">
+            </div>
+
+            <div style="margin-bottom: 25px; display: flex; align-items: center;">
+                <input type="checkbox" id="paper_mode" name="paper_trading_mode" {{ 'checked' if
+                    settings.paper_trading_mode else '' }} style="margin-right: 10px;">
+                <label for="paper_mode" style="color: white;">Paper Trading Mode</label>
+            </div>
+
+            <div style="text-align: right;">
+                <button type="submit" class="btn btn-success">Save Configuration</button>
+            </div>
+        </form>
+    </div>
+</main>
+{% endblock %}
