@@ -5,13 +5,9 @@ Thumber Trader is a high-frequency, adaptive grid trading bot designed for Coinb
 ## 🚀 Key Features
 
 - **Modular FastAPI Architecture**: High-performance backend with an HTMX-powered web dashboard.
-- **Adaptive Grid Engine**: Supports arithmetic and geometric spacing with optional ATR-based volatility adjustments.
-- **Alpha Fusion**: Combines RSI, MACD, and Order Book Imbalance for intelligent entry/exit decisions.
-- **Risk Management**: Kelly Criterion allocation, VaR/CVaR tracking, hard stop-losses, and automated inventory caps.
-- **Market Sentiment & Toxicity**: Built-in VPIN (Volume-Synchronized Probability of Informed Trading) and optional sentiment-driven overrides.
-- **Multi-Venue Pricing**: Consensus pricing blending data from Coinbase, Binance, Kraken, and Bybit.
-- **High Availability**: Optional active-passive failover for mission-critical deployments.
-- **Tax-Ready Logging**: SQLite persistence with support for FIFO, LIFO, and HIFO tax lot matching.
+- **Arithmetic Grid Engine**: Reliable grid trading with arithmetic spacing.
+- **Basic Analysis**: Integrated RSI and EMA indicators for market context.
+- **Tax-Ready Logging**: SQLite persistence with FIFO tax lot matching for reporting.
 
 ## 🛠 Prerequisites
 
@@ -107,14 +103,10 @@ Once running, access the dashboard at:
 - **Main Dashboard**: Real-time status, open orders, and PnL metrics.
 - **Config Editor**: Edit bot settings live without restarting.
 - **Health Check**: Available at `/health`.
-- **Metrics**: Prometheus-compatible metrics at `/metrics`.
 
 ---
 
-## 🧪 Analysis & Backtesting
-
-Advanced analysis tools are located in `app/core/analysis.py`.
-(Manual backtesting instructions coming soon in the v2 CLI update).
+Basic analysis tools are located in `app/core/analysis.py`.
 
 ---
 
