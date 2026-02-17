@@ -36,5 +36,13 @@
             <p>Loading orders...</p>
         </div>
     </div>
+
+    <!-- Recent Fills Widget -->
+    <div class="card" style="grid-column: span 2;">
+        <h2>Recent Fills</h2>
+        <div id="fills-widget" hx-get="/dashboard/fills" hx-trigger="load, every 5s">
+            <p>Loading fills...</p>
+        </div>
+    </div>
 </main>
 {% endblock %}

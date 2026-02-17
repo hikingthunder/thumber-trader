@@ -1,0 +1,37 @@
+<table>
+    <thead>
+        <tr>
+            <th>Time</th>
+            <th>Side</th>
+            <th>Price</th>
+            <th>Size</th>
+            <th>Grid Index</th>
+            <th>Realized PnL</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for fill in fills %}
+        <tr>
+            <td style="color: #94a3b8;">{{ fill.ts }}</td>
+            <td style="color: {{ '#10b981' if fill.side == 'BUY' else '#ef4444' }}; font-weight: bold;">
+                {{ fill.side }}
+            </td>
+            <td>{{ fill.price }}</td>
+            <td>{{ fill.base_size }}</td>
+            <td>{{ fill.grid_index }}</td>
+            <td style="color: {{ '#10b981' if fill.raw_pnl > 0 else '#ef4444' if fill.raw_pnl < 0 else '#94a3b8' }};">
+                {% if fill.realized_pnl_usd %}
+                ${{ fill.realized_pnl_usd }}
+                {% else %}
+                -
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        {% if not fills %}
+        <tr>
+            <td colspan="6" style="text-align: center; color: #94a3b8;">No recent fills</td>
+        </tr>
+        {% endif %}
+    </tbody>
+</table>
