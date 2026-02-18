@@ -24,11 +24,49 @@
 </header>
 
 <main class="dashboard-grid">
+    <!-- Price Chart Widget -->
+    <div class="card" style="grid-column: span 2;">
+        <h2>Market Chart ({{ product_id }})</h2>
+        <div id="chart-container" style="height: 400px; width: 100%;"></div>
+    </div>
+
     <!-- Stats Widget -->
-    <div id="stats-widget" class="card" hx-get="/dashboard/stats" hx-trigger="load, every 2s">
+    <div id="stats-widget" class="card" hx-get="/dashboard/stats" hx-target="this" hx-trigger="load, every 2s">
         <!-- Initial Content Loading... -->
         <p>Loading stats...</p>
     </div>
+
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <script>
+        const chart = LightweightCharts.createChart(document.getElementById('chart-container'), {
+            layout: {
+                backgroundColor: '#1e293b',
+                textColor: '#f1f5f9',
+            },
+            grid: {
+                vertLines: { color: '#334155' },
+                horzLines: { color: '#334155' },
+            },
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+            priceScale: { borderColor: '#334155' },
+            timeScale: { borderColor: '#334155' },
+        });
+
+        const lineSeries = chart.addLineSeries({
+            color: '#3b82f6',
+            lineWidth: 2,
+        });
+
+        // Simple poll for price updates
+        setInterval(async () => {
+            try {
+                const response = await fetch('/dashboard/stats');
+                const text = await response.text();
+                // Parsing price from summary HTML or adding a dedicated endpoint would be better.
+                // For now, let's assume we might need a dedicated price endpoint for the chart.
+            } catch (e) { }
+        }, 2000);
+    </script>
 
     <!-- Active Orders Widget -->
     <div class="card" style="grid-column: span 2;">

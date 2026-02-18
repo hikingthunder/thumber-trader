@@ -223,10 +223,12 @@ class Settings(BaseSettings):
     sentiment_negative_threshold: Decimal = Decimal("-0.6")
     sentiment_safe_inventory_cap_pct: Decimal = Decimal("0.20")
 
-    # Telegram
+    # Notifications
+    notifications_enabled: bool = True
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_whitelist_chat_id: str = ""
+    discord_webhook_url: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

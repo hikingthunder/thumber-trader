@@ -13,6 +13,7 @@ from app.database.db import get_db, AsyncSessionLocal
 from app.database.models import Order, Fill, DailyStats, TaxLot, TaxLotMatch
 from app.core.state import SharedRiskState
 from app.core import analysis
+from app.utils.notifications import notify
 from sqlalchemy import select, update, delete
 from sqlalchemy.orm import Session
 
@@ -203,6 +204,8 @@ class GridStrategy(StrategyEngine):
             return
             
         order = self.orders[order_id]
+        msg = f"🔔 *Order Filled*: {order['side']} {order['base_size']} {self.product_id} @ {order['price']}"
+        await notify(msg)
         logger.info(f"Order {order_id} ({order['side']} @ {order['price']}) filled.")
         
         # RECORD FILL
@@ -591,7 +594,9 @@ class GridStrategy(StrategyEngine):
             if total_value > 0:
                 pnl_pct = unrealized_pnl / total_value
                 if pnl_pct < -settings.hard_stop_loss_pct:
-                    logger.warning(f"CRITICAL: Hard Stop-Loss reached ({pnl_pct*100:.2f}% < -{settings.hard_stop_loss_pct*100:.2f}%). Stopping strategy and canceling all orders.")
+                    msg = f"⚠️ *CRITICAL*: Hard Stop-Loss reached ({pnl_pct*100:.2f}% < -{settings.hard_stop_loss_pct*100:.2f}%). Stopping strategy and canceling all orders."
+                    logger.warning(msg)
+                    await notify(msg, force=True)
                     self.stop()
                     # Cancel all open orders for this product
                     order_ids = list(self.active_order_ids)
