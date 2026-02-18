@@ -1,120 +1,105 @@
-# Thumber Trader v2.0
+# ⚡ Thumber Trader v2.0: The Institutional-Grade Grid Bot
 
-Thumber Trader is a high-frequency, adaptive grid trading bot designed for Coinbase Advanced Trade. Now evolved into a modular FastAPI application, it features a modern web dashboard, robust risk management, and advanced market analysis capabilities.
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
-## 🚀 Key Features
+**Thumber Trader** is a high-frequency, ultra-adaptive grid trading engine built for the modern crypto market. Evolved from a simple script into a robust **FastAPI ecosystem**, it combines industrial-strength risk management with cutting-edge market analysis to keep you ahead of the spread.
 
-- **Modular FastAPI Architecture**: High-performance backend with an HTMX-powered dashboard.
-- **Adaptive Grid Engine**: Supports **Arithmetic & Geometric** spacing with **ATR-based** dynamic volatility bands.
-- **Alpha Fusion**: Blends **RSI and MACD** signals for intelligent entry/exit and sizing.
-- **Risk management**: Includes **Kelly Criterion** sizing and global **Hard Stop-Loss**.
-- **Market Sentiment & Toxicity**: **VPIN** algorithm to detect toxic flow and widen bands.
-- **Multi-Venue Pricing**: Consensus pricing from **Binance, Kraken, and Bybit**.
-- **High Availability**: Active-Passive failover with database-backed master election.
-- **Tax-Ready Logging**: **FIFO, LIFO, and HIFO** matching with real-time PnL tracking.
-- **Metrics**: Prometheus-compatible `/metrics` endpoint.
-
-## 🛠 Prerequisites
-
-- **Python 3.10+** (if running natively)
-- **Coinbase Advanced Trade API Key** (with Trade and View permissions)
-- **Docker & Docker Compose** (optional, for containerized deployment)
+> [!IMPORTANT]
+> **Why Thumber Trader?** Most bots react to the market. Thumber Trader *anticipates* it using order flow toxicity (VPIN) and signal fusion.
 
 ---
 
-## 📦 Installation Options
+## 🔥 Key Competitive Edge
 
-### 1. Docker (Recommended for Proxmox/LXC/VPS)
-The easiest way to get started.
+| Feature | Description | Benefit |
+|---------|-------------|---------|
+| **Adaptive Grid** | Arithmetic & Geometric spacing with ATR-adaptive bands. | Maximizes yield in both ranging and trending markets. |
+| **Alpha Fusion** | Real-time RSI + MACD + Order Book Imbalance signals. | Filters noise and avoids "catching the falling knife." |
+| **VPIN Engine** | Detects "Toxic Flow" before a breakout happens. | Automatically halts or widens bands to prevent stop-outs. |
+| **Kelly Criterion** | Mathematical position sizing based on historical performance. | Optimizes capital growth while managing ruin risk. |
+| **Multi-Venue Pricing**| Consolidation from Coinbase, Binance, Kraken, and Bybit. | Ensures accurate execution prices and prevents oracle manipulation. |
+| **High Availability** | Active-Passive failover with database-backed election. | 99.9% uptime for your capital. |
+
+---
+
+## 🚀 Get Started in 5 Minutes
+
+### 1. The Container Way (Recommended)
+Perfect for Proxmox, VPS, or Docker-hardened environments.
 
 ```bash
-# Clone the repository
 git clone https://github.com/hikingthunder/thumber-trader.git
 cd thumber-trader
-
-# Create and edit your .env file (see Configuration section)
 cp .env.example .env
-
-# Start the application
+# Edit .env with your Coinbase Keys
 docker-compose up -d
 ```
 
-### 2. Debian/Ubuntu (Native Linux)
-Perfect for Proxmox LXC containers or dedicated servers.
+### 2. Native Linux (Debian/Ubuntu/LXC)
+The choice for performance purists.
 
 ```bash
-# Install system packages
-sudo apt update && sudo apt install -y python3 python3-venv git curl
-
-# Setup directory
-sudo mkdir -p /opt/thumber-trader
-sudo chown $USER:$USER /opt/thumber-trader
-cd /opt/thumber-trader
-
-# Setup virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
+# Install dependencies
+sudo apt update && sudo apt install -y python3-venv git curl
+python3 -m venv .venv && source .venv/activate
 pip install -r requirements.txt
 
-# Run the app (ensure .env is present)
+# Run the engine
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-### 3. Windows
-Running natively on Windows.
-
+### 3. Windows (PowerShell)
 ```powershell
-# In PowerShell
-git clone https://github.com/hikingthunder/thumber-trader.git
-cd thumber-trader
-
-# Create virtual environment
 python -m venv .venv
 .\.venv\Scripts\activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Run the app
 uvicorn app.main:app --host 127.0.0.1 --port 8080
 ```
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ Advanced Configuration (No Files Needed!)
 
-Copy the `.env` file and populate it with your credentials and preferences.
+Forget digging through `.env` files. Thumber Trader features a **Premium Configuration Dashboard** where you can tune:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `COINBASE_API_KEY` | Your Coinbase API Key | |
-| `COINBASE_API_SECRET` | Your Coinbase API Secret | |
-| `PRODUCT_ID` | Default trading pair (e.g., BTC-USD) | `BTC-USD` |
-| `GRID_LINES` | Number of grid levels | `8` |
-| `GRID_BAND_PCT` | Total width of the grid (±%) | `0.15` (15%) |
-| `AUTO_START` | Automatically start the bot on launch| `True` |
-| `PAPER_TRADING_MODE` | Simulate trades without real funds | `False` |
-
-*Refer to `app/config.py` for a full list of over 100 configuration options.*
+- **Product Management**: Trade BTC, ETH, SOL and more simultaneously.
+- **Toxicity Controls**: Tune VPIN sensitivity and response modes.
+- **Strategy Stacks**: Layer core grid logic with alpha and hedging layers.
+- **Notifications**: Instant alerts via Telegram or Discord Webhooks.
+- **Safe Start**: Execute "Base Buys" with VWAP algorithms to enter positions smoothly.
 
 ---
 
-## 📊 Monitoring & Controls
+## 📈 Dashboard & Monitoring
 
-Once running, access the dashboard at:
-`http://localhost:8080` (or your server IP)
+Access your command center at `http://localhost:8080`:
 
-- **Main Dashboard**: Real-time status, open orders, and PnL metrics.
-- **Config Editor**: Edit bot settings live without restarting.
-- **Health Check**: Available at `/health`.
+- **Real-time Charting**: Visualize your grid levels against live price action.
+- **PnL Tracking**: Comprehensive daily stats and realized/unrealized metrics.
+- **Tax-Ready Exports**: One-click accounting exports (CSV, XLSX, ODS) with FIFO support.
+- **Prometheus Metrics**: Ready-to-go `/metrics` endpoint for Grafana integration.
 
 ---
 
-Basic analysis tools are located in `app/core/analysis.py`.
+## ❓ FAQ
+
+**Q: Can I use this for Paper Trading?**  
+A: Yes! Enable `PAPER_TRADING_MODE=True` in the dashboard to test your strategies with zero risk.
+
+**Q: Which API Keys do I need?**  
+A: You need **Coinbase Advanced Trade** keys with `Trade` and `View` permissions.
+
+**Q: How do I handle Proxmox LXC?**  
+A: Use the Native Linux instructions. Thumber Trader is extremely lightweight and runs perfectly in a 1-core, 512MB RAM Debian LXC.
 
 ---
 
 ## ⚖️ Disclaimer
 
-Trading cryptocurrencies involves significant risk. This bot is provided as-is without any guarantees of profit. Use `PAPER_TRADING_MODE=True` before risking real capital. Not financial advice.
+Trading cryptocurrencies involves significant risk. Thumber Trader is a tool, not a guarantee. **Always test in paper mode first.** Not financial advice.
+
+---
+
+*Made with ❤️ by the hikingthunder team.*

@@ -12,108 +12,211 @@
 
 <main>
     <style>
-        .config-section {
-            margin-bottom: 30px;
-            padding-bottom: 20px;
-            border-bottom: 1px solid var(--border-color);
+        .config-container {
+            max-width: 1000px;
+            margin: 0 auto;
         }
 
-        .config-section:last-child {
-            border-bottom: none;
+        .config-section {
+            margin-bottom: 40px;
+            padding: 30px;
+            background: rgba(30, 41, 59, 0.3);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .config-section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: var(--grad-primary);
         }
 
         .config-section h2 {
-            font-size: 1.1rem;
+            font-size: 1.25rem;
             color: var(--accent-color);
-            margin-bottom: 15px;
+            margin-bottom: 25px;
             display: flex;
             align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 15px;
         }
 
         .config-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
         }
 
         .form-group {
-            margin-bottom: 15px;
+            margin-bottom: 20px;
         }
 
         .form-group label {
             display: block;
-            margin-bottom: 5px;
-            color: #94a3b8;
+            margin-bottom: 8px;
+            color: var(--text-muted);
             font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
         }
 
         .form-group input,
         .form-group select,
         .form-group textarea {
             width: 100%;
-            padding: 10px;
-            background: #0f172a;
+            padding: 12px 16px;
+            background: #020617;
             border: 1px solid var(--border-color);
             color: white;
-            border-radius: 6px;
-            font-size: 0.9rem;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 3px var(--accent-glow);
         }
 
         .form-group input[type="checkbox"] {
-            width: auto;
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+            accent-color: var(--accent-color);
+            cursor: pointer;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 12px;
+            background: rgba(15, 23, 42, 0.5);
+            border-radius: 8px;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .checkbox-group:hover {
+            border-color: var(--border-color);
+            background: rgba(30, 41, 59, 0.5);
         }
 
         .help-text {
             font-size: 0.75rem;
-            color: #64748b;
-            margin-top: 4px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            line-height: 1.4;
+        }
+
+        .section-intro {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 20px;
+        }
+
+        .sticky-footer {
+            position: sticky;
+            bottom: 20px;
+            z-index: 10;
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(16px);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 40px;
+            box-shadow: 0 -10px 25px -5px rgba(0, 0, 0, 0.3);
+        }
+
+        .alert {
+            margin-bottom: 30px;
+            padding: 20px;
+            border-radius: 12px;
+            border-left: 4px solid transparent;
+            font-weight: 500;
+        }
+
+        .alert-success {
+            background: rgba(16, 185, 129, 0.1);
+            border-left-color: #10b981;
+            color: #34d399;
+        }
+
+        .alert-danger {
+            background: rgba(239, 68, 68, 0.1);
+            border-left-color: #ef4444;
+            color: #f87171;
         }
     </style>
 
-    <div class="card" style="max-width: 800px; margin: 0 auto;">
+    <div class="config-container">
         {% if message %}
-        <div style="padding: 10px; border-radius: 6px; margin-bottom: 20px; 
-            background-color: {{ 'rgba(16, 185, 129, 0.2)' if success else 'rgba(239, 68, 68, 0.2)' }};
-            color: {{ '#10b981' if success else '#ef4444' }}; border: 1px solid currentColor;">
-            {{ message }}
+        <div class="alert {{ 'alert-success' if success else 'alert-danger' }}">
+            {{ '✅' if success else '❌' }} {{ message }}
         </div>
         {% endif %}
 
         <form method="post" action="/config">
-            <!-- Core API -->
+            <!-- API Credentials -->
             <div class="config-section">
                 <h2>🔑 API Credentials</h2>
+                <p class="section-intro">Configure your connection to Coinbase Advanced Trade.</p>
                 <div class="form-group">
                     <label>Coinbase API Key</label>
-                    <input type="text" name="coinbase_api_key" value="{{ api_key_val }}">
+                    <input type="password" name="coinbase_api_key" value="{{ api_key_val }}">
                 </div>
                 <div class="form-group">
                     <label>Coinbase API Secret (Private Key PEM)</label>
-                    <textarea name="coinbase_api_secret" placeholder="Keep blank to remain unchanged"></textarea>
-                    <div class="help-text">Leave blank to keep your existing secret safely stored.</div>
+                    <textarea name="coinbase_api_secret" rows="4"
+                        placeholder="Keep blank to remain unchanged"></textarea>
+                    <div class="help-text">Paste your Private Key PEM here. It will be encrypted before storage. Leave
+                        blank if already configured.</div>
+                </div>
+                <div class="config-grid">
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="paper_mode" name="paper_trading_mode" {{ 'checked' if
+                            settings.paper_trading_mode }}>
+                        <label for="paper_mode" style="margin: 0;">Paper Trading Mode</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="auto_start" name="auto_start" {{ 'checked' if settings.auto_start }}>
+                        <label for="auto_start" style="margin: 0;">Auto-Start Engine</label>
+                    </div>
                 </div>
             </div>
 
-            <!-- Trading Logic -->
+            <!-- Trading Strategy -->
             <div class="config-section">
                 <h2>📊 Trading Strategy</h2>
                 <div class="config-grid">
                     <div class="form-group">
-                        <label>Product ID (e.g. BTC-USD)</label>
-                        <input type="text" name="product_id" value="{{ settings.product_id }}">
+                        <label>Product IDs (Comma separated)</label>
+                        <input type="text" name="product_ids" value="{{ settings.product_ids }}">
+                        <div class="help-text">e.g. BTC-USD,ETH-USD</div>
                     </div>
                     <div class="form-group">
-                        <label>Grid Lines (Count)</label>
+                        <label>Grid Lines</label>
                         <input type="number" name="grid_lines" value="{{ settings.grid_lines }}">
-                        <div class="help-text">Default: 8</div>
                     </div>
                     <div class="form-group">
-                        <label>Grid Band % (Total Width)</label>
-                        <input type="number" step="0.01" name="grid_band_pct" value="{{ settings.grid_band_pct }}">
-                        <div class="help-text">Default: 0.15 (15%)</div>
+                        <label>Grid Band %</label>
+                        <input type="number" step="0.001" name="grid_band_pct" value="{{ settings.grid_band_pct }}">
                     </div>
                     <div class="form-group">
-                        <label>Grid Spacing Mode</label>
+                        <label>Spacing Mode</label>
                         <select name="grid_spacing_mode">
                             <option value="arithmetic" {{ 'selected' if settings.grid_spacing_mode=='arithmetic' }}>
                                 Arithmetic</option>
@@ -121,54 +224,186 @@
                                 Geometric</option>
                         </select>
                     </div>
-                </div>
-                <div class="form-group" style="display: flex; align-items: center; margin-top: 10px;">
-                    <input type="checkbox" id="paper_mode" name="paper_trading_mode" {{ 'checked' if
-                        settings.paper_trading_mode }}>
-                    <label for="paper_mode" style="margin-left: 10px; margin-bottom: 0;">Paper Trading Mode</label>
-                </div>
-            </div>
-
-            <!-- Alpha Fusion -->
-            <div class="config-section">
-                <h2>🧠 Alpha Fusion & Sentiment</h2>
-                <div class="form-group" style="display: flex; align-items: center; margin-bottom: 10px;">
-                    <input type="checkbox" id="alpha_enabled" name="alpha_fusion_enabled" {{ 'checked' if
-                        settings.alpha_fusion_enabled }}>
-                    <label for="alpha_enabled" style="margin-left: 10px; margin-bottom: 0;">Enable Alpha Fusion</label>
-                </div>
-                <div class="config-grid">
                     <div class="form-group">
-                        <label>RSI Weight</label>
-                        <input type="number" step="0.01" name="alpha_weight_rsi"
-                            value="{{ settings.alpha_weight_rsi }}">
-                        <div class="help-text">Default: 0.3</div>
+                        <label>Min Grid Profit %</label>
+                        <input type="number" step="0.0001" name="min_grid_profit_pct"
+                            value="{{ settings.min_grid_profit_pct }}">
                     </div>
                     <div class="form-group">
-                        <label>MACD Weight</label>
-                        <input type="number" step="0.01" name="alpha_weight_macd"
-                            value="{{ settings.alpha_weight_macd }}">
-                        <div class="help-text">Default: 0.3</div>
+                        <label>Poll Interval (Seconds)</label>
+                        <input type="number" name="poll_seconds" value="{{ settings.poll_seconds }}">
                     </div>
                 </div>
             </div>
 
             <!-- Risk Management -->
             <div class="config-section">
-                <h2>🛡️ Risk Management</h2>
+                <h2>🛡️ Risk & Capital</h2>
                 <div class="config-grid">
                     <div class="form-group">
-                        <label>Base Order Notional (USD)</label>
+                        <label>Base Order (USD)</label>
                         <input type="number" step="1" name="base_order_notional_usd"
                             value="{{ settings.base_order_notional_usd }}">
-                        <div class="help-text">Default: $10.00</div>
                     </div>
                     <div class="form-group">
                         <label>Hard Stop-Loss %</label>
                         <input type="number" step="0.01" name="hard_stop_loss_pct"
                             value="{{ settings.hard_stop_loss_pct }}">
-                        <div class="help-text">Default: 0.08 (8%)</div>
                     </div>
+                    <div class="form-group">
+                        <label>Max Inventory %</label>
+                        <input type="number" step="0.01" name="max_btc_inventory_pct"
+                            value="{{ settings.max_btc_inventory_pct }}">
+                        <div class="help-text">Max base asset exposure relative to total portfolio.</div>
+                    </div>
+                    <div class="form-group">
+                        <label>Quote Reserve %</label>
+                        <input type="number" step="0.01" name="quote_reserve_pct"
+                            value="{{ settings.quote_reserve_pct }}">
+                        <div class="help-text">Percentage of quote asset to keep on sidelines.</div>
+                    </div>
+                </div>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="kelly_enabled" name="kelly_allocation_enabled" {{ 'checked' if
+                        settings.kelly_allocation_enabled }}>
+                    <label for="kelly_enabled" style="margin: 0;">Enable Kelly Criterion Sizing</label>
+                </div>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="liquidity_check" name="liquidity_depth_check_enabled" {{ 'checked' if
+                        settings.liquidity_depth_check_enabled }}>
+                    <label for="liquidity_check" style="margin: 0;">Enable Liquidity Depth Check</label>
+                </div>
+            </div>
+
+            <!-- Alpha Fusion & Sentiment -->
+            <div class="config-section">
+                <h2>🧠 Alpha Fusion & Sentiment</h2>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="alpha_enabled" name="alpha_fusion_enabled" {{ 'checked' if
+                        settings.alpha_fusion_enabled }}>
+                    <label for="alpha_enabled" style="margin: 0;">Enable Alpha Fusion (RSI/MACD/Imbalance)</label>
+                </div>
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>RSI Weight</label>
+                        <input type="number" step="0.01" name="alpha_weight_rsi"
+                            value="{{ settings.alpha_weight_rsi }}">
+                    </div>
+                    <div class="form-group">
+                        <label>MACD Weight</label>
+                        <input type="number" step="0.01" name="alpha_weight_macd"
+                            value="{{ settings.alpha_weight_macd }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Imbalance Weight</label>
+                        <input type="number" step="0.01" name="alpha_weight_imbalance"
+                            value="{{ settings.alpha_weight_imbalance }}">
+                    </div>
+                </div>
+                <div class="checkbox-group" style="margin-top: 15px;">
+                    <input type="checkbox" id="sentiment_enabled" name="sentiment_override_enabled" {{ 'checked' if
+                        settings.sentiment_override_enabled }}>
+                    <label for="sentiment_enabled" style="margin: 0;">Enable Sentiment Override</label>
+                </div>
+                <div class="form-group">
+                    <label>Sentiment API URL</label>
+                    <input type="text" name="sentiment_source_url" value="{{ settings.sentiment_source_url }}">
+                </div>
+            </div>
+
+            <!-- Order Flow (VPIN) -->
+            <div class="config-section">
+                <h2>🌊 Order Flow & VPIN</h2>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="vpin_enabled" name="vpin_enabled" {{ 'checked' if settings.vpin_enabled
+                        }}>
+                    <label for="vpin_enabled" style="margin: 0;">Enable VPIN Toxicity Detection</label>
+                </div>
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>VPIN Response Mode</label>
+                        <select name="vpin_response_mode">
+                            <option value="widen" {{ 'selected' if settings.vpin_response_mode=='widen' }}>Widen Bands
+                            </option>
+                            <option value="halt" {{ 'selected' if settings.vpin_response_mode=='halt' }}>Halt Trading
+                            </option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Widen Multiplier</label>
+                        <input type="number" step="0.1" name="vpin_widen_band_multiplier"
+                            value="{{ settings.vpin_widen_band_multiplier }}">
+                    </div>
+                    <div class="form-group">
+                        <label>VPIN Threshold (Percentile)</label>
+                        <input type="number" step="0.01" name="vpin_threshold_percentile"
+                            value="{{ settings.vpin_threshold_percentile }}">
+                    </div>
+                </div>
+            </div>
+
+            <!-- High Availability & Consensus -->
+            <div class="config-section">
+                <h2>🌐 Multi-Venue & HA</h2>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="consensus_enabled" name="consensus_pricing_enabled" {{ 'checked' if
+                        settings.consensus_pricing_enabled }}>
+                    <label for="consensus_enabled" style="margin: 0;">Enable Consensus Pricing</label>
+                </div>
+                <div class="form-group">
+                    <label>Consensus Exchanges</label>
+                    <input type="text" name="consensus_exchanges" value="{{ settings.consensus_exchanges }}">
+                    <div class="help-text">comma-separated: coinbase,binance,kraken,bybit</div>
+                </div>
+                <div class="checkbox-group" style="margin-top: 20px;">
+                    <input type="checkbox" id="ha_enabled" name="ha_failover_enabled" {{ 'checked' if
+                        settings.ha_failover_enabled }}>
+                    <label for="ha_enabled" style="margin: 0;">Enable HA Failover</label>
+                </div>
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>Instance ID</label>
+                        <input type="text" name="ha_instance_id" value="{{ settings.ha_instance_id }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Lock Lease (Seconds)</label>
+                        <input type="number" name="ha_lock_lease_seconds" value="{{ settings.ha_lock_lease_seconds }}">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Advanced Volatility -->
+            <div class="config-section">
+                <h2>⚡ ATR Adaptive Grid</h2>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="atr_enabled" name="atr_enabled" {{ 'checked' if settings.atr_enabled }}>
+                    <label for="atr_enabled" style="margin: 0;">Enable ATR Adaptive Bands</label>
+                </div>
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>ATR Period</label>
+                        <input type="number" name="atr_period" value="{{ settings.atr_period }}">
+                    </div>
+                    <div class="form-group">
+                        <label>ATR Band Multiplier</label>
+                        <input type="number" step="0.1" name="atr_band_multiplier"
+                            value="{{ settings.atr_band_multiplier }}">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Strategy Stack -->
+            <div class="config-section">
+                <h2>📚 Strategy Stack</h2>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="stack_enabled" name="strategy_stack_enabled" {{ 'checked' if
+                        settings.strategy_stack_enabled }}>
+                    <label for="stack_enabled" style="margin: 0;">Enable Multi-Layer Strategy Stack</label>
+                </div>
+                <div class="form-group">
+                    <label>Stack Layers</label>
+                    <input type="text" name="strategy_stack_layers" value="{{ settings.strategy_stack_layers }}">
+                    <div class="help-text">e.g. core,alpha,hedge</div>
                 </div>
             </div>
 
@@ -176,35 +411,40 @@
             <div class="config-section">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
                     <h2 style="margin-bottom: 0;">🔔 Notifications</h2>
-                    <button type="button" class="btn" style="background-color: var(--border-color); font-size: 0.8rem;"
+                    <button type="button" class="btn"
+                        style="background: var(--border-color); font-size: 0.8rem; height: 36px;"
                         hx-post="/config/test-notifications" hx-target="#test-result" hx-swap="innerHTML">
                         Test Connection
                     </button>
                 </div>
                 <div id="test-result" style="margin-bottom: 15px; font-size: 0.85rem;"></div>
-                <div class="form-group" style="display: flex; align-items: center; margin-bottom: 10px;">
+                <div class="checkbox-group">
                     <input type="checkbox" id="notify_enabled" name="notifications_enabled" {{ 'checked' if
                         settings.notifications_enabled }}>
-                    <label for="notify_enabled" style="margin-left: 10px; margin-bottom: 0;">Enable
-                        Notifications</label>
+                    <label for="notify_enabled" style="margin: 0;">Enable Global Notifications</label>
                 </div>
                 <div class="form-group">
                     <label>Telegram Bot Token</label>
-                    <input type="text" name="telegram_bot_token" value="{{ settings.telegram_bot_token }}">
+                    <input type="password" name="telegram_bot_token"
+                        value="{{ '********' if settings.telegram_bot_token else '' }}">
                 </div>
                 <div class="form-group">
                     <label>Telegram Chat ID</label>
-                    <input type="text" name="telegram_chat_id" value="{{ settings.telegram_chat_id }}">
+                    <input type="password" name="telegram_chat_id"
+                        value="{{ '********' if settings.telegram_chat_id else '' }}">
                 </div>
                 <div class="form-group">
                     <label>Discord Webhook URL</label>
-                    <input type="text" name="discord_webhook_url" value="{{ settings.discord_webhook_url }}">
+                    <input type="password" name="discord_webhook_url"
+                        value="{{ '********' if settings.discord_webhook_url else '' }}">
                 </div>
             </div>
 
-            <div style="text-align: right; margin-top: 30px;">
-                <button type="submit" class="btn btn-success" style="padding: 12px 30px;">💾 Save & Apply (Requires
-                    Restart)</button>
+            <div class="sticky-footer">
+                <button type="submit" class="btn btn-success"
+                    style="padding: 12px 40px; font-size: 1.1rem; letter-spacing: 0.5px;">
+                    🚀 SAVE CONFIGURATION & RESTART
+                </button>
             </div>
         </form>
     </div>

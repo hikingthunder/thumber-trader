@@ -36,42 +36,39 @@ async def get_config(request: Request):
 async def update_config(request: Request):
     """Handle configuration updates."""
     form = await request.form()
-    
-    # Extract known fields
     updates = {}
     
-    # Map form fields to env vars
-    if "coinbase_api_key" in form:
-        updates["COINBASE_API_KEY"] = form["coinbase_api_key"]
-    if "coinbase_api_secret" in form and form["coinbase_api_secret"].strip() != "":
-        updates["COINBASE_API_SECRET"] = form["coinbase_api_secret"]
-    if "product_id" in form:
-        updates["PRODUCT_ID"] = form["product_id"]
-    if "grid_lines" in form:
-        updates["GRID_LINES"] = form["grid_lines"]
-    if "grid_band_pct" in form:
-        updates["GRID_BAND_PCT"] = form["grid_band_pct"]
-    if "grid_spacing_mode" in form:
-        updates["GRID_SPACING_MODE"] = form["grid_spacing_mode"]
-    if "alpha_weight_rsi" in form:
-        updates["ALPHA_WEIGHT_RSI"] = form["alpha_weight_rsi"]
-    if "alpha_weight_macd" in form:
-        updates["ALPHA_WEIGHT_MACD"] = form["alpha_weight_macd"]
-    if "base_order_notional_usd" in form:
-        updates["BASE_ORDER_NOTIONAL_USD"] = form["base_order_notional_usd"]
-    if "hard_stop_loss_pct" in form:
-        updates["HARD_STOP_LOSS_PCT"] = form["hard_stop_loss_pct"]
-    if "telegram_bot_token" in form:
-        updates["TELEGRAM_BOT_TOKEN"] = form["telegram_bot_token"]
-    if "telegram_chat_id" in form:
-        updates["TELEGRAM_CHAT_ID"] = form["telegram_chat_id"]
-    if "discord_webhook_url" in form:
-        updates["DISCORD_WEBHOOK_URL"] = form["discord_webhook_url"]
+    # We dynamically map form fields to settings
+    # This allows us to handle many settings without a massive if/else block
+    for key, value in form.items():
+        # Map back to ENV_VAR names (UPPER_CASE)
+        env_key = key.upper()
+        
+        # Skip internal form fields or empty secrets
+        if key.startswith("_") or (key.endswith("_secret") and value == "********") or (key.endswith("_token") and value == "********"):
+            continue
+            
+        # Handle special case for coinbase_api_secret (PEM files usually multi-line)
+        if key == "coinbase_api_secret" and not value.strip():
+            continue
 
-    # Checkbox handling (FastAPI/Starlette forms return "on" for checked, or missing for unchecked)
-    updates["PAPER_TRADING_MODE"] = "true" if form.get("paper_trading_mode") == "on" else "false"
-    updates["ALPHA_FUSION_ENABLED"] = "true" if form.get("alpha_fusion_enabled") == "on" else "false"
-    updates["NOTIFICATIONS_ENABLED"] = "true" if form.get("notifications_enabled") == "on" else "false"
+        # For checkboxes, they only appear if checked
+        # We handle them separately below for clarity as they need a True/False string
+        if key in ["paper_trading_mode", "auto_start", "kelly_allocation_enabled", "liquidity_depth_check_enabled", 
+                  "alpha_fusion_enabled", "sentiment_override_enabled", "vpin_enabled", "consensus_pricing_enabled", 
+                  "ha_failover_enabled", "atr_enabled", "strategy_stack_enabled", "notifications_enabled"]:
+            continue
+            
+        updates[env_key] = str(value)
+
+    # Handle all expected checkboxes
+    checkbox_fields = [
+        "paper_trading_mode", "auto_start", "kelly_allocation_enabled", "liquidity_depth_check_enabled", 
+        "alpha_fusion_enabled", "sentiment_override_enabled", "vpin_enabled", "consensus_pricing_enabled", 
+        "ha_failover_enabled", "atr_enabled", "strategy_stack_enabled", "notifications_enabled"
+    ]
+    for field in checkbox_fields:
+        updates[field.upper()] = "true" if form.get(field) == "on" else "false"
     
     # Save to .env
     try:
