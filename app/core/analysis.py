@@ -57,7 +57,7 @@ def atr(candles: List[Tuple[int, Decimal, Decimal, Decimal]], period: int) -> De
 
     true_ranges: List[Decimal] = []
     prev_close = candles[0][3]
-    for _ts, high, low, close in candles[1:]:
+    for _ts, high, low, close, *_ in candles[1:]:
         tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
         true_ranges.append(tr)
         prev_close = close
@@ -78,7 +78,7 @@ def adx(candles: List[Tuple[int, Decimal, Decimal, Decimal]], period: int) -> De
     prev_low = candles[0][2]
     prev_close = candles[0][3]
 
-    for _ts, high, low, close in candles[1:]:
+    for _ts, high, low, close, *_ in candles[1:]:
         up_move = high - prev_high
         down_move = prev_low - low
 
@@ -433,35 +433,38 @@ def survival_probability(
     }
 
 def vpin(
-    volumes: List[Decimal], 
-    price_changes: List[Decimal], 
+    candles: List[Tuple[int, Decimal, Decimal, Decimal, Decimal]], 
     bucket_count: int = 50
 ) -> Decimal:
     """
     Calculate Volume-Synchronized Probability of Informed Trading (VPIN).
-    Simplified version using candle-based volume buckets.
+    Uses price-action proxy for order flow imbalance within candles.
     """
-    if len(volumes) < bucket_count or len(price_changes) < bucket_count:
+    if len(candles) < bucket_count:
         return Decimal("0.5")
     
     # Calculate Order Imbalance relative to total volume
-    # In a simplified version, we use price direction as a proxy for trade direction
+    # Proxy: V_buy = V * (Close - Low) / (High - Low)
     imbalances = []
-    for v, dp in zip(volumes[-bucket_count:], price_changes[-bucket_count:]):
-        # If price went up, assume mostly buy volume, etc.
-        # This is a crude proxy for actual trade-by-trade imbalance
-        if dp > 0:
-            imbalances.append(v) # Buy imbalance
-        elif dp < 0:
-            imbalances.append(-v) # Sell imbalance
+    total_volume = Decimal("0")
+    
+    for c in candles[-bucket_count:]:
+        _ts, high, low, close, volume = c
+        total_volume += volume
+        
+        price_range = high - low
+        if price_range > 0:
+            v_buy = volume * (close - low) / price_range
+            v_sell = volume - v_buy
+            imbalances.append(abs(v_buy - v_sell))
         else:
+            # Neutral if no price range
             imbalances.append(Decimal("0"))
 
-    total_volume = sum(volumes[-bucket_count:], Decimal("0"))
     if total_volume <= 0:
         return Decimal("0.5")
         
-    abs_imbalance = sum([abs(i) for i in imbalances], Decimal("0"))
+    abs_imbalance = sum(imbalances, Decimal("0"))
     return abs_imbalance / total_volume
 
 def calculate_geometric_levels(

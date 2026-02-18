@@ -4,6 +4,7 @@ import logging
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple, Callable
 import uuid
@@ -227,7 +228,9 @@ class CoinbaseExchange:
             return None
 
         def _fetch():
-            req = urllib.request.Request(url, headers={"User-Agent": "thumber-trader/2.0"})
+            # Using a more standard browser user-agent to avoid 403s from Bybit
+            ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            req = urllib.request.Request(url, headers={"User-Agent": ua})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 return json.loads(resp.read().decode("utf-8"))
 
@@ -243,6 +246,13 @@ class CoinbaseExchange:
             elif exchange == "bybit":
                 result = data.get("result", {}).get("list", [{}])[0]
                 return Decimal(str(result.get("lastPrice", 0)))
+        except urllib.error.HTTPError as e:
+            if e.code in [403, 451]:
+                # Suppress noisy warnings for geoblocking or bot detection
+                logging.debug(f"Exchange {exchange} returned {e.code} (likely geoblocked or bot-detected)")
+            else:
+                logging.warning(f"HTTP error from {exchange} for {symbol}: {e}")
+            return None
         except Exception as e:
             logging.warning(f"Failed to fetch {exchange} price for {symbol}: {e}")
             return None

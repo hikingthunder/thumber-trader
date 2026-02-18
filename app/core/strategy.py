@@ -435,9 +435,7 @@ class GridStrategy(StrategyEngine):
         atr_val = analysis.atr(self.candles, settings.atr_period)
         
         # VPIN (Order Flow Toxicity)
-        volumes = [c[4] for c in self.candles]
-        price_changes = [(c[3] - self.candles[i-1][3]) if i > 0 else Decimal("0") for i, c in enumerate(self.candles)]
-        vpin_val = analysis.vpin(volumes, price_changes, settings.vpin_rolling_buckets)
+        vpin_val = analysis.vpin(self.candles, settings.vpin_rolling_buckets)
 
         logger.debug(f"Analysis: RSI={rsi_val:.2f}, Trend={trend}, ATR={atr_val}, MACD_Hist={macd_hist:.4f}, VPIN={vpin_val:.2f}")
         return {
