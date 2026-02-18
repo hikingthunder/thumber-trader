@@ -28,6 +28,27 @@ class SharedRiskState:
         self.cointegration_signals: Dict[Tuple[str, str], Dict[str, str]] = {}
         self.black_litterman_weights: Dict[str, Decimal] = {}
         self.black_litterman_views: Dict[str, Decimal] = {}
+        self.shared_usd_reserve = Decimal("0")
+
+    def get_shared_usd_reserve(self) -> Decimal:
+        with self.lock:
+            return self.shared_usd_reserve
+
+    def set_shared_usd_reserve(self, value: Decimal) -> None:
+        with self.lock:
+            self.shared_usd_reserve = value
+
+    def manage_reserves(self, product_id: str, pnl: Decimal) -> Decimal:
+        """
+        Allocate a portion of realized PnL to the shared reserve.
+        Returns the amount remains for the strategy after reserve deduction.
+        """
+        with self.lock:
+            if pnl > 0:
+                reserve_portion = pnl * Decimal("0.10") # 10% to reserve
+                self.shared_usd_reserve += reserve_portion
+                return pnl - reserve_portion
+            return pnl
 
     def set_inventory_cap(self, product_id: str, cap: Decimal) -> None:
         with self.lock:

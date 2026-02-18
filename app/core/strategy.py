@@ -25,6 +25,10 @@ class GridStrategy(StrategyEngine):
         self.exchange = exchange
         self.shared_risk_state = shared_risk_state
         self.running = False
+        self.paused = False
+        
+        # Quantitative tools
+        self.kalman = analysis.KalmanFilter()
         
         # State variables
         self.grid_levels: List[Decimal] = []
@@ -51,6 +55,11 @@ class GridStrategy(StrategyEngine):
         
         while self.running:
             try:
+                if self.paused:
+                    logger.debug(f"Strategy for {self.product_id} is paused. Skipping loop.")
+                    await asyncio.sleep(5)
+                    continue
+
                 # 0. HA Check (Persistent via DB)
                 if settings.ha_failover_enabled:
                     is_master = await self._acquire_ha_lock_db()
@@ -143,6 +152,11 @@ class GridStrategy(StrategyEngine):
                 granularity=settings.trend_candle_granularity,
                 limit=300
             )
+            
+            # Update Kalman Filter with latest price
+            if self.last_price > 0:
+                self.last_price = Decimal(str(self.kalman.update(float(self.last_price))))
+
         except Exception as e:
             logger.warning(f"Market data update failed: {e}")
 
@@ -208,30 +222,18 @@ class GridStrategy(StrategyEngine):
         await notify(msg)
         logger.info(f"Order {order_id} ({order['side']} @ {order['price']}) filled.")
         
-        # RECORD FILL
+        realized_pnl = Decimal("0") # Initialize PnL for this fill
+        fee = Decimal("0") # TODO: Calculate or fetch fee
+
         async with AsyncSessionLocal() as session:
             # Verify it exists in DB to avoid FK errors or duplicate processing
             db_order = await session.get(Order, order_id)
             if db_order:
-                # Create Fill record
-                fill = Fill(
-                    ts=time.time(),
-                    product_id=self.product_id,
-                    side=order["side"],
-                    price=str(order["price"]),
-                    base_size=str(order["base_size"]),
-                    fee_paid="0", # TODO: Calculate or fetch fee
-                    grid_index=order["grid_index"],
-                    order_id=order_id
-                )
-                session.add(fill)
-                await session.flush() # Get fill.id
-
                 # TAX LOT LOGIC
                 if order["side"] == "BUY":
                     # Create new Tax Lot
                     new_lot = TaxLot(
-                        buy_fill_id=fill.id,
+                        buy_fill_id=None, # Will be updated after fill is added
                         acquired_ts=time.time(),
                         product_id=self.product_id,
                         buy_price=str(order["price"]),
@@ -262,7 +264,7 @@ class GridStrategy(StrategyEngine):
                     
                     open_lots = (await session.execute(stmt)).scalars().all()
                     
-                    total_pnl = Decimal("0")
+                    total_pnl_for_sell = Decimal("0")
                     
                     for lot in open_lots:
                         if sell_size <= 0:
@@ -281,11 +283,11 @@ class GridStrategy(StrategyEngine):
                         cost_basis = match_size * Decimal(lot.buy_price)
                         proceeds = match_size * sell_price
                         pnl = proceeds - cost_basis
-                        total_pnl += pnl
+                        total_pnl_for_sell += pnl
                         
                         # Create match record
                         match = TaxLotMatch(
-                            sell_fill_id=fill.id,
+                            sell_fill_id=None, # Will be updated after fill is added
                             lot_id=lot.id,
                             matched_base_size=str(match_size),
                             buy_price=lot.buy_price,
@@ -300,8 +302,36 @@ class GridStrategy(StrategyEngine):
                         
                         sell_size -= match_size
                     
-                    fill.realized_pnl_usd = str(total_pnl)
-                    self.realized_pnl += total_pnl
+                    realized_pnl = total_pnl_for_sell # Assign to the outer variable
+                    self.realized_pnl += total_pnl_for_sell
+
+                # Manage reserves with the calculated PnL
+                pnl_to_record = self.shared_risk_state.manage_reserves(self.product_id, realized_pnl)
+
+                # Create Fill record
+                new_fill = Fill(
+                    ts=time.time(),
+                    product_id=self.product_id,
+                    side=order["side"],
+                    price=str(order["price"]),
+                    base_size=str(order["base_size"]),
+                    fee_paid=str(fee),
+                    grid_index=order["grid_index"],
+                    order_id=order_id,
+                    tax_lot_method=settings.tax_lot_method,
+                    realized_pnl_usd=str(pnl_to_record)
+                )
+                session.add(new_fill)
+                await session.flush() # Get fill.id
+
+                # Update buy_fill_id for new_lot and sell_fill_id for matches if they were created
+                if order["side"] == "BUY":
+                    if 'new_lot' in locals(): # Check if new_lot was created
+                        new_lot.buy_fill_id = new_fill.id
+                elif order["side"] == "SELL":
+                    for match_obj in session.new:
+                        if isinstance(match_obj, TaxLotMatch):
+                            match_obj.sell_fill_id = new_fill.id
 
                 # Remove from Orders table
                 await session.delete(db_order)
@@ -450,6 +480,52 @@ class GridStrategy(StrategyEngine):
              "price": self.last_price
         }
 
+    def _detect_regime(self) -> str:
+        """Use HMM to detect current market regime."""
+        if not settings.hmm_regime_detection_enabled or len(self.candles) < settings.hmm_lookback:
+            return "NORMAL"
+            
+        try:
+            closes = [c[3] for c in self.candles[-settings.hmm_lookback:]]
+            returns = analysis.calculate_returns(closes)
+            
+            # Simple HMM fitting (initially) or using pre-trained model
+            # For now, we'll use the analysis module's fit function
+            res = analysis.fit_gaussian_hmm(
+                returns, 
+                n_states=settings.hmm_states,
+                iterations=settings.hmm_iterations,
+                min_variance=settings.hmm_min_variance
+            )
+            
+            if not res:
+                return "NORMAL"
+                
+            init_out, trans_out, means, variances = res
+            
+            # Identify "Volatile" vs "Quiet" states
+            # Quiet: High return/low variance or Mid return/mid variance
+            # Volatile: High variance
+            idx_max_var = variances.index(max(variances))
+            idx_min_var = variances.index(min(variances))
+            
+            current_probs = analysis.hmm_filter_probabilities(returns[-5:], init_out, trans_out, means, variances)
+            if not current_probs:
+                return "NORMAL"
+                
+            current_state = current_probs.index(max(current_probs))
+            
+            if current_state == idx_max_var:
+                return "VOLATILE"
+            elif current_state == idx_min_var:
+                return "QUIET"
+            else:
+                return "NORMAL"
+                
+        except Exception as e:
+            logger.warning(f"HMM Regime Detection failed: {e}")
+            return "NORMAL"
+
     def _calculate_grid_levels(self, mid_price: Decimal, band_pct: Decimal) -> List[Decimal]:
         """Calculate grid levels based on spacing mode."""
         upper = mid_price * (1 + band_pct)
@@ -462,21 +538,25 @@ class GridStrategy(StrategyEngine):
             return [lower + (step * i) for i in range(settings.grid_lines)]
 
     async def _execute_grid_logic(self, metrics: Dict[str, Any]):
-        """Main decision loop for initial placement or rebalancing logic."""
+        """Main decision loop for grid placement and sizing."""
         if not settings.alpha_fusion_enabled:
              # Fallback to basic grid if alpha fusion disabled
              return await self._execute_basic_grid_logic(metrics)
 
-        # Alpha Fusion logic
-        rsi = metrics.get("rsi", Decimal("50"))
-        macd_hist = metrics.get("macd_hist", Decimal("0"))
+        # 1. Alpha Fusion Sentiment
+        rsi_score = Decimal("0")
+        if metrics["rsi"] < 30: rsi_score = Decimal("1")
+        elif metrics["rsi"] > 70: rsi_score = Decimal("-1")
         
-        # Scoring: Combine RSI and MACD for a sentiment score [-1, 1]
-        # RSI < 30 is bullish (oversold), RSI > 70 is bearish (overbought)
-        rsi_score = (Decimal("50") - rsi) / Decimal("20") # bull if > 1, bear if < -1 roughly
-        macd_score = macd_hist / (self.last_price * Decimal("0.001")) # scale macd
+        macd_score = Decimal("1") if metrics["macd_hist"] > 0 else Decimal("-1")
         
         sentiment = (rsi_score * settings.alpha_weight_rsi + macd_score * settings.alpha_weight_macd).quantize(Decimal("0.01"))
+        
+        # Black-Litterman Adjustment
+        bl_view = self.shared_risk_state.black_litterman_views.get(self.product_id, Decimal("0"))
+        if bl_view != 0:
+            sentiment = (sentiment + bl_view) / Decimal("2")
+            logger.debug(f"Black-Litterman Adjusted Sentiment: {sentiment:.2f}")
         
         # Dynamic Sizing with Kelly Criterion
         base_notional = settings.base_order_notional_usd
@@ -501,6 +581,15 @@ class GridStrategy(StrategyEngine):
              if vpin_val > settings.vpin_threshold_percentile: # threshold used as absolute for now
                   current_band_pct = current_band_pct * settings.vpin_widen_band_multiplier
                   logger.warning(f"High Toxicity detected (VPIN={vpin_val:.2f}). Widening bands to {current_band_pct*100:.2f}%")
+
+        # HMM Regime Adjustment
+        regime = self._detect_regime()
+        if regime == "VOLATILE":
+            current_band_pct = current_band_pct * Decimal("1.25")
+            logger.info(f"HMM detected VOLATILE regime. Widening bands to {current_band_pct*100:.2f}%")
+        elif regime == "QUIET":
+            current_band_pct = current_band_pct * Decimal("0.85")
+            logger.info(f"HMM detected QUIET regime. Narrowing bands to {current_band_pct*100:.2f}%")
 
         # Sentiment Overrides
         if settings.sentiment_override_enabled:
@@ -603,6 +692,30 @@ class GridStrategy(StrategyEngine):
                     if order_ids:
                         await self.exchange.cancel_orders(order_ids)
                         # TODO: Market sell inventory if required?
+
+    async def on_ws_fill(self, event: Dict[str, Any]):
+        """Handle real-time fill from WebSocket."""
+        # WebSocket events are faster than REST polling
+        # Reconcile if order is in our active set
+        order_id = event.get("order_id")
+        if isinstance(order_id, str) and order_id in self.orders:
+            logger.info(f"WS Fill received for {order_id}")
+            await self._handle_fill(order_id)
+
+    async def on_ws_ticker(self, ticker: Dict[str, Any]):
+        """Handle real-time price update from WebSocket."""
+        price = Decimal(ticker.get("price", "0"))
+        if price > 0:
+            # Update last_price via Kalman filter for smoothing
+            self.last_price = Decimal(str(self.kalman.update(float(price))))
+            
+            # Micro-price calculation if depth is available
+            best_bid = Decimal(ticker.get("best_bid", "0"))
+            best_ask = Decimal(ticker.get("best_ask", "0"))
+            if best_bid > 0 and best_ask > 0:
+                # Note: ticker doesn't always have depth sizes in simple format
+                # If available, we'd use analysis.calculate_micro_price(best_bid, bid_size, best_ask, ask_size)
+                pass
 
     def stop(self):
         """Signal the strategy loop to stop."""

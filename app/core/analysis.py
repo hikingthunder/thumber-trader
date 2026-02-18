@@ -480,3 +480,62 @@ def calculate_geometric_levels(
     ratio = Decimal(str(math.pow(float(upper / lower), 1.0 / (n - 1))))
     levels = [lower * (ratio ** i) for i in range(n)]
     return levels
+
+class KalmanFilter:
+    """
+    A simple 1D Kalman Filter for estimating the 'fair value' of an asset.
+    """
+    def __init__(self, process_variance: float = 1e-5, estimated_measurement_variance: float = 0.1**2):
+        self.q = process_variance  # Process noise variance
+        self.r = estimated_measurement_variance  # Measurement noise variance
+        self.x = 0.0  # State estimate
+        self.p = 1.0  # Error covariance
+        self._initialized = False
+
+    def update(self, measurement: float) -> float:
+        if not self._initialized:
+            self.x = measurement
+            self._initialized = True
+            return self.x
+
+        # Prediction phase
+        # self.p = self.p + self.q
+
+        # Update phase
+        k = self.p / (self.p + self.r)  # Kalman gain
+        self.x = self.x + k * (measurement - self.x)
+        self.p = (1 - k) * self.p + self.q
+
+        return self.x
+
+def calculate_micro_price(bid: Decimal, bid_size: Decimal, ask: Decimal, ask_size: Decimal) -> Decimal:
+    """
+    Calculates the 'Micro-Price' which weights the bid and ask by their respective book depth.
+    Provides a leading indicator of price movement.
+    """
+    total_size = bid_size + ask_size
+    if total_size == 0:
+        return (bid + ask) / 2
+    return (bid * ask_size + ask * bid_size) / total_size
+
+def garch_volatility_forecast(returns: List[float]) -> float:
+    """
+    Simplified GARCH(1,1) volatility forecast.
+    sigma_t^2 = omega + alpha * r_{t-1}^2 + beta * sigma_{t-1}^2
+    Using fixed parameters for a robust 'typical' crypto behavior as a proxy.
+    """
+    if len(returns) < 30:
+        return 0.0
+    
+    # Parameters (standard GARCH(1,1) estimates for crypto)
+    omega = 1e-6
+    alpha = 0.1
+    beta = 0.85
+    
+    # Initial variance estimate (historical variance)
+    vol_sq = sum(r**2 for r in returns) / len(returns)
+    
+    for r in returns:
+        vol_sq = omega + alpha * (r**2) + beta * vol_sq
+        
+    return math.sqrt(vol_sq)
