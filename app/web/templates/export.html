@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block content %}
+<header>
+    <div>
+        <h1>Thumber Trader - Export</h1>
+        <div style="font-size: 0.9rem; color: #94a3b8;">
+            Product: <span style="color: white;">{{ product_id }}</span> |
+            Mode: <span style="color: {{ 'orange' if paper_trading else 'white' }};">
+                {{ 'PAPER TRADING' if paper_trading else 'LIVE' }}
+            </span>
+        </div>
+    </div>
+
+    <nav>
+        <a href="/">Dashboard</a>
+        <a href="/export" style="color: var(--accent-color);">Export</a>
+        <a href="/config">Configuration</a>
+    </nav>
+</header>
+
+<main>
+    {% include "partials/export_controls.html" %}
+
+    <div class="card mt-4">
+        <h2>Export Information</h2>
+        <p style="color: #94a3b8;">
+            Use this page to export your trading data for accounting and tax purposes.
+            The formats provided are compatible with most spreadsheet applications and
+            specialized accounting software like Quickbooks and Quicken.
+        </p>
+        <ul style="color: #94a3b8; padding-left: 20px;">
+            <li><strong>Fills / Trades:</strong> All executed orders with price, size, and fees.</li>
+            <li><strong>Tax Matches:</strong> Realized PnL calculated using your chosen tax lot method (default FIFO).
+            </li>
+            <li><strong>Daily Stats:</strong> Performance metrics tracked over time.</li>
+        </ul>
+    </div>
+</main>
+{% endblock %}

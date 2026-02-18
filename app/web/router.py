@@ -7,8 +7,11 @@ from app.core.manager import manager
 from app.config import settings
 from app.utils.helpers import update_env_file
 from app.database.db import AsyncSessionLocal
-from app.database.models import Fill
+from app.database.models import Fill, TaxLotMatch, DailyStats
 from sqlalchemy import select
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from app.utils.export import export_data, models_to_dicts, map_to_accounting, get_accounting_headers
+import io
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/web/templates")
@@ -200,3 +203,67 @@ async def control_bot(request: Request, action: str):
     
     # Return updated stats partial to reflect state immediately
     return await get_dashboard_stats(request)
+
+@router.get("/export", response_class=HTMLResponse)
+async def get_export_page(request: Request):
+    """Render the data export page."""
+    context = {
+        "request": request,
+        "product_id": settings.product_id,
+        "paper_trading": settings.paper_trading_mode
+    }
+    return templates.TemplateResponse("export.html", context)
+
+@router.get("/export/{type}/{format}")
+async def export_data_endpoint(request: Request, type: str, format: str):
+    """Export data in various formats."""
+    async with AsyncSessionLocal() as session:
+        if type == "fills":
+            stmt = select(Fill).order_by(Fill.ts.desc())
+            result = await session.execute(stmt)
+            models = result.scalars().all()
+            data = models_to_dicts(models)
+            headers = [column.key for column in Fill.__table__.columns]
+            prefix = "fills_export"
+        elif type == "tax_matches":
+            stmt = select(TaxLotMatch).order_by(TaxLotMatch.created_ts.desc())
+            result = await session.execute(stmt)
+            models = result.scalars().all()
+            data = models_to_dicts(models)
+            headers = [column.key for column in TaxLotMatch.__table__.columns]
+            prefix = "tax_matches_export"
+        elif type == "stats":
+            stmt = select(DailyStats).order_by(DailyStats.ts.desc())
+            result = await session.execute(stmt)
+            models = result.scalars().all()
+            data = models_to_dicts(models)
+            headers = [column.key for column in DailyStats.__table__.columns]
+            prefix = "daily_stats_export"
+        elif type == "accounting_fills":
+            stmt = select(Fill).order_by(Fill.ts.desc())
+            result = await session.execute(stmt)
+            models = result.scalars().all()
+            raw_data = models_to_dicts(models)
+            data = map_to_accounting(raw_data, "fills")
+            headers = get_accounting_headers("fills")
+            prefix = "accounting_fills"
+            type = "fills" # Reset for helper logic if needed
+        elif type == "accounting_tax":
+            stmt = select(TaxLotMatch).order_by(TaxLotMatch.created_ts.desc())
+            result = await session.execute(stmt)
+            models = result.scalars().all()
+            raw_data = models_to_dicts(models)
+            data = map_to_accounting(raw_data, "tax_matches")
+            headers = get_accounting_headers("tax_matches")
+            prefix = "accounting_tax_matches"
+            type = "tax_matches"
+        else:
+            raise HTTPException(status_code=400, detail="Invalid export type")
+
+    content, filename, mimetype = export_data(data, headers, prefix, format)
+    
+    return StreamingResponse(
+        io.BytesIO(content if isinstance(content, bytes) else content.encode()),
+        media_type=mimetype,
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )

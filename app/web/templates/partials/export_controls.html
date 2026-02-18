@@ -1,0 +1,63 @@
+<div class="card" style="grid-column: span 2;">
+    <h2>Export Data</h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem;">
+        <!-- Standard Exports -->
+        <div class="export-group">
+            <h3>Fills / Trades</h3>
+            <div class="btn-group">
+                <a href="/export/fills/csv" class="btn btn-secondary">CSV</a>
+                <a href="/export/fills/xlsx" class="btn btn-secondary">XLSX</a>
+                <a href="/export/fills/ods" class="btn btn-secondary">ODS</a>
+            </div>
+        </div>
+
+        <div class="export-group">
+            <h3>Tax matches</h3>
+            <div class="btn-group">
+                <a href="/export/tax_matches/csv" class="btn btn-secondary">CSV</a>
+                <a href="/export/tax_matches/xlsx" class="btn btn-secondary">XLSX</a>
+                <a href="/export/tax_matches/ods" class="btn btn-secondary">ODS</a>
+            </div>
+        </div>
+
+        <div class="export-group">
+            <h3>Daily Stats</h3>
+            <div class="btn-group">
+                <a href="/export/stats/csv" class="btn btn-secondary">CSV</a>
+                <a href="/export/stats/xlsx" class="btn btn-secondary">XLSX</a>
+                <a href="/export/stats/ods" class="btn btn-secondary">ODS</a>
+            </div>
+        </div>
+
+        <!-- Specialized Exports -->
+        <div class="export-group">
+            <h3>Accounting (QB/Quicken)</h3>
+            <div class="btn-group">
+                <a href="/export/accounting_fills/csv" class="btn btn-primary">Fills (CSV)</a>
+                <a href="/export/accounting_tax/csv" class="btn btn-primary">Tax Lots (CSV)</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .export-group h3 {
+        font-size: 0.9rem;
+        color: #94a3b8;
+        margin-bottom: 0.5rem;
+    }
+
+    .btn-group {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .btn-secondary {
+        background-color: #334155;
+        color: white;
+    }
+
+    .btn-secondary:hover {
+        background-color: #475569;
+    }
+</style>

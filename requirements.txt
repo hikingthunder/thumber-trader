@@ -6,3 +6,6 @@ pydantic-settings
 jinja2
 python-multipart
 coinbase-advanced-py
+tablib[xlsx,ods]
+openpyxl
+odfpy
