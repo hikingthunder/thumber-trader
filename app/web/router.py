@@ -44,13 +44,34 @@ async def update_config(request: Request):
     if "coinbase_api_key" in form:
         updates["COINBASE_API_KEY"] = form["coinbase_api_key"]
     if "coinbase_api_secret" in form and form["coinbase_api_secret"].strip() != "":
-         # Only update secret if provided (don't overwrite with empty if they left it blank to keep existing)
         updates["COINBASE_API_SECRET"] = form["coinbase_api_secret"]
     if "product_id" in form:
         updates["PRODUCT_ID"] = form["product_id"]
-    
-    # Checkbox handling
+    if "grid_lines" in form:
+        updates["GRID_LINES"] = form["grid_lines"]
+    if "grid_band_pct" in form:
+        updates["GRID_BAND_PCT"] = form["grid_band_pct"]
+    if "grid_spacing_mode" in form:
+        updates["GRID_SPACING_MODE"] = form["grid_spacing_mode"]
+    if "alpha_weight_rsi" in form:
+        updates["ALPHA_WEIGHT_RSI"] = form["alpha_weight_rsi"]
+    if "alpha_weight_macd" in form:
+        updates["ALPHA_WEIGHT_MACD"] = form["alpha_weight_macd"]
+    if "base_order_notional_usd" in form:
+        updates["BASE_ORDER_NOTIONAL_USD"] = form["base_order_notional_usd"]
+    if "hard_stop_loss_pct" in form:
+        updates["HARD_STOP_LOSS_PCT"] = form["hard_stop_loss_pct"]
+    if "telegram_bot_token" in form:
+        updates["TELEGRAM_BOT_TOKEN"] = form["telegram_bot_token"]
+    if "telegram_chat_id" in form:
+        updates["TELEGRAM_CHAT_ID"] = form["telegram_chat_id"]
+    if "discord_webhook_url" in form:
+        updates["DISCORD_WEBHOOK_URL"] = form["discord_webhook_url"]
+
+    # Checkbox handling (FastAPI/Starlette forms return "on" for checked, or missing for unchecked)
     updates["PAPER_TRADING_MODE"] = "true" if form.get("paper_trading_mode") == "on" else "false"
+    updates["ALPHA_FUSION_ENABLED"] = "true" if form.get("alpha_fusion_enabled") == "on" else "false"
+    updates["NOTIFICATIONS_ENABLED"] = "true" if form.get("notifications_enabled") == "on" else "false"
     
     # Save to .env
     try:
@@ -189,20 +210,28 @@ async def get_fills_table(request: Request):
     }
     return templates.TemplateResponse("partials/fills.html", context)
 
-@router.post("/dashboard/control/{action}", response_class=HTMLResponse)
-async def control_bot(request: Request, action: str):
-    """Start or Stop the bot via HTMX."""
-    if action == "start":
-        await manager.start()
-        message = "Bot Started"
-    elif action == "stop":
-        await manager.stop()
-        message = "Bot Stopped"
-    else: 
-        raise HTTPException(status_code=400, detail="Invalid action")
-    
-    # Return updated stats partial to reflect state immediately
-    return await get_dashboard_stats(request)
+@router.get("/dashboard/price")
+async def get_dashboard_price():
+    """Return latest price for the chart."""
+    import time
+    status = await manager.get_global_stats()
+    product_status = status.get("strategies", {}).get(settings.product_id, {})
+    return {
+        "price": float(product_status.get("last_price", 0)),
+        "time": int(time.time())
+    }
+
+@router.post("/config/test-notifications", response_class=HTMLResponse)
+async def test_notifications(request: Request):
+    """Send a test notification."""
+    from app.utils.notifications import notify
+    try:
+        msg = "🧪 *Thumber Trader*: This is a test notification. Your settings are working correctly!"
+        # We force notification even if disabled in settings for the test
+        await notify(msg, force=True)
+        return """<span style="color: #10b981;">✅ Test sent! Check your Telegram/Discord.</span>"""
+    except Exception as e:
+        return f"""<span style="color: #ef4444;">❌ Failed: {str(e)}</span>"""
 
 @router.get("/export", response_class=HTMLResponse)
 async def get_export_page(request: Request):

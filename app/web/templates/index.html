@@ -60,11 +60,17 @@
         // Simple poll for price updates
         setInterval(async () => {
             try {
-                const response = await fetch('/dashboard/stats');
-                const text = await response.text();
-                // Parsing price from summary HTML or adding a dedicated endpoint would be better.
-                // For now, let's assume we might need a dedicated price endpoint for the chart.
-            } catch (e) { }
+                const response = await fetch('/dashboard/price');
+                const data = await response.json();
+                if (data.price > 0) {
+                    lineSeries.update({
+                        time: data.time,
+                        value: data.price
+                    });
+                }
+            } catch (e) {
+                console.error("Chart update failed:", e);
+            }
         }, 2000);
     </script>
 

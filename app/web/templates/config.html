@@ -11,8 +11,66 @@
 </header>
 
 <main>
-    <div class="card" style="max-width: 600px; margin: 0 auto;">
+    <style>
+        .config-section {
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+        }
 
+        .config-section:last-child {
+            border-bottom: none;
+        }
+
+        .config-section h2 {
+            font-size: 1.1rem;
+            color: var(--accent-color);
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #94a3b8;
+            font-size: 0.85rem;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            background: #0f172a;
+            border: 1px solid var(--border-color);
+            color: white;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .form-group input[type="checkbox"] {
+            width: auto;
+        }
+
+        .help-text {
+            font-size: 0.75rem;
+            color: #64748b;
+            margin-top: 4px;
+        }
+    </style>
+
+    <div class="card" style="max-width: 800px; margin: 0 auto;">
         {% if message %}
         <div style="padding: 10px; border-radius: 6px; margin-bottom: 20px; 
             background-color: {{ 'rgba(16, 185, 129, 0.2)' if success else 'rgba(239, 68, 68, 0.2)' }};
@@ -22,36 +80,131 @@
         {% endif %}
 
         <form method="post" action="/config">
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; color: #94a3b8;">Coinbase API Key</label>
-                <input type="text" name="coinbase_api_key" value="{{ api_key_val }}"
-                    style="width: 100%; padding: 10px; background: #0f172a; border: 1px solid var(--border-color); color: white; border-radius: 6px;">
+            <!-- Core API -->
+            <div class="config-section">
+                <h2>🔑 API Credentials</h2>
+                <div class="form-group">
+                    <label>Coinbase API Key</label>
+                    <input type="text" name="coinbase_api_key" value="{{ api_key_val }}">
+                </div>
+                <div class="form-group">
+                    <label>Coinbase API Secret (Private Key PEM)</label>
+                    <textarea name="coinbase_api_secret" placeholder="Keep blank to remain unchanged"></textarea>
+                    <div class="help-text">Leave blank to keep your existing secret safely stored.</div>
+                </div>
             </div>
 
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; color: #94a3b8;">Coinbase API Secret / Private
-                    Key</label>
-                <textarea name="coinbase_api_secret"
-                    placeholder="-----BEGIN EC PRIVATE KEY-----&#10;...&#10;-----END EC PRIVATE KEY-----"
-                    style="width: 100%; height: 120px; padding: 10px; background: #0f172a; border: 1px solid var(--border-color); color: white; border-radius: 6px; font-family: monospace;"></textarea>
-                <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">Paste the full Private Key (PEM format)
-                    or legacy API Secret here. Leave blank to keep unchanged.</div>
+            <!-- Trading Logic -->
+            <div class="config-section">
+                <h2>📊 Trading Strategy</h2>
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>Product ID (e.g. BTC-USD)</label>
+                        <input type="text" name="product_id" value="{{ settings.product_id }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Grid Lines (Count)</label>
+                        <input type="number" name="grid_lines" value="{{ settings.grid_lines }}">
+                        <div class="help-text">Default: 8</div>
+                    </div>
+                    <div class="form-group">
+                        <label>Grid Band % (Total Width)</label>
+                        <input type="number" step="0.01" name="grid_band_pct" value="{{ settings.grid_band_pct }}">
+                        <div class="help-text">Default: 0.15 (15%)</div>
+                    </div>
+                    <div class="form-group">
+                        <label>Grid Spacing Mode</label>
+                        <select name="grid_spacing_mode">
+                            <option value="arithmetic" {{ 'selected' if settings.grid_spacing_mode=='arithmetic' }}>
+                                Arithmetic</option>
+                            <option value="geometric" {{ 'selected' if settings.grid_spacing_mode=='geometric' }}>
+                                Geometric</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; margin-top: 10px;">
+                    <input type="checkbox" id="paper_mode" name="paper_trading_mode" {{ 'checked' if
+                        settings.paper_trading_mode }}>
+                    <label for="paper_mode" style="margin-left: 10px; margin-bottom: 0;">Paper Trading Mode</label>
+                </div>
             </div>
 
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; color: #94a3b8;">Product ID</label>
-                <input type="text" name="product_id" value="{{ settings.product_id }}"
-                    style="width: 100%; padding: 10px; background: #0f172a; border: 1px solid var(--border-color); color: white; border-radius: 6px;">
+            <!-- Alpha Fusion -->
+            <div class="config-section">
+                <h2>🧠 Alpha Fusion & Sentiment</h2>
+                <div class="form-group" style="display: flex; align-items: center; margin-bottom: 10px;">
+                    <input type="checkbox" id="alpha_enabled" name="alpha_fusion_enabled" {{ 'checked' if
+                        settings.alpha_fusion_enabled }}>
+                    <label for="alpha_enabled" style="margin-left: 10px; margin-bottom: 0;">Enable Alpha Fusion</label>
+                </div>
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>RSI Weight</label>
+                        <input type="number" step="0.01" name="alpha_weight_rsi"
+                            value="{{ settings.alpha_weight_rsi }}">
+                        <div class="help-text">Default: 0.3</div>
+                    </div>
+                    <div class="form-group">
+                        <label>MACD Weight</label>
+                        <input type="number" step="0.01" name="alpha_weight_macd"
+                            value="{{ settings.alpha_weight_macd }}">
+                        <div class="help-text">Default: 0.3</div>
+                    </div>
+                </div>
             </div>
 
-            <div style="margin-bottom: 25px; display: flex; align-items: center;">
-                <input type="checkbox" id="paper_mode" name="paper_trading_mode" {{ 'checked' if
-                    settings.paper_trading_mode else '' }} style="margin-right: 10px;">
-                <label for="paper_mode" style="color: white;">Paper Trading Mode</label>
+            <!-- Risk Management -->
+            <div class="config-section">
+                <h2>🛡️ Risk Management</h2>
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>Base Order Notional (USD)</label>
+                        <input type="number" step="1" name="base_order_notional_usd"
+                            value="{{ settings.base_order_notional_usd }}">
+                        <div class="help-text">Default: $10.00</div>
+                    </div>
+                    <div class="form-group">
+                        <label>Hard Stop-Loss %</label>
+                        <input type="number" step="0.01" name="hard_stop_loss_pct"
+                            value="{{ settings.hard_stop_loss_pct }}">
+                        <div class="help-text">Default: 0.08 (8%)</div>
+                    </div>
+                </div>
             </div>
 
-            <div style="text-align: right;">
-                <button type="submit" class="btn btn-success">Save Configuration</button>
+            <!-- Notifications -->
+            <div class="config-section">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <h2 style="margin-bottom: 0;">🔔 Notifications</h2>
+                    <button type="button" class="btn" style="background-color: var(--border-color); font-size: 0.8rem;"
+                        hx-post="/config/test-notifications" hx-target="#test-result" hx-swap="innerHTML">
+                        Test Connection
+                    </button>
+                </div>
+                <div id="test-result" style="margin-bottom: 15px; font-size: 0.85rem;"></div>
+                <div class="form-group" style="display: flex; align-items: center; margin-bottom: 10px;">
+                    <input type="checkbox" id="notify_enabled" name="notifications_enabled" {{ 'checked' if
+                        settings.notifications_enabled }}>
+                    <label for="notify_enabled" style="margin-left: 10px; margin-bottom: 0;">Enable
+                        Notifications</label>
+                </div>
+                <div class="form-group">
+                    <label>Telegram Bot Token</label>
+                    <input type="text" name="telegram_bot_token" value="{{ settings.telegram_bot_token }}">
+                </div>
+                <div class="form-group">
+                    <label>Telegram Chat ID</label>
+                    <input type="text" name="telegram_chat_id" value="{{ settings.telegram_chat_id }}">
+                </div>
+                <div class="form-group">
+                    <label>Discord Webhook URL</label>
+                    <input type="text" name="discord_webhook_url" value="{{ settings.discord_webhook_url }}">
+                </div>
+            </div>
+
+            <div style="text-align: right; margin-top: 30px;">
+                <button type="submit" class="btn btn-success" style="padding: 12px 30px;">💾 Save & Apply (Requires
+                    Restart)</button>
             </div>
         </form>
     </div>

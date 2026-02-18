@@ -22,7 +22,11 @@ async def send_telegram_message(message: str) -> bool:
     
     def _send():
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "ThumberTraderBot/1.0"
+        }
+        req = urllib.request.Request(url, data=data, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.getcode() == 200
 
@@ -43,7 +47,11 @@ async def send_discord_message(message: str) -> bool:
     
     def _send():
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(settings.discord_webhook_url, data=data, headers={"Content-Type": "application/json"})
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "ThumberTraderBot/1.0"
+        }
+        req = urllib.request.Request(settings.discord_webhook_url, data=data, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.getcode() in [200, 204]
 
