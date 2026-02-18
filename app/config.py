@@ -10,8 +10,8 @@ class Settings(BaseSettings):
     Loads from environment variables and .env file.
     """
     # Product and Grid settings
-    coinbase_api_key: SecretStr = None
-    coinbase_api_secret: SecretStr = None
+    coinbase_api_key: Optional[SecretStr] = None
+    coinbase_api_secret: Optional[SecretStr] = None
     product_id: str = "BTC-USD"
     product_ids: str = "BTC-USD"
     grid_lines: int = 8
@@ -215,7 +215,7 @@ class Settings(BaseSettings):
     # Sentiment Override
     sentiment_override_enabled: bool = False
     sentiment_source_url: str = ""
-    sentiment_api_bearer_token: SecretStr = ""
+    sentiment_api_bearer_token: Optional[SecretStr] = None
     sentiment_json_path: str = "score"
     sentiment_asset_query_param: str = "symbol"
     sentiment_refresh_seconds: int = 300
@@ -225,10 +225,10 @@ class Settings(BaseSettings):
 
     # Notifications
     notifications_enabled: bool = True
-    telegram_bot_token: SecretStr = ""
-    telegram_chat_id: SecretStr = ""
+    telegram_bot_token: Optional[SecretStr] = None
+    telegram_chat_id: Optional[SecretStr] = None
     telegram_whitelist_chat_id: str = ""
-    discord_webhook_url: SecretStr = ""
+    discord_webhook_url: Optional[SecretStr] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

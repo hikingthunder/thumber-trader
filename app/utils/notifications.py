@@ -8,14 +8,21 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+def get_secret(v):
+    """Safely extract secret value if it's a SecretStr, otherwise return as is."""
+    return v.get_secret_value() if hasattr(v, "get_secret_value") else v
+
 async def send_telegram_message(message: str) -> bool:
     """Send a message via Telegram Bot API."""
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+    token = get_secret(settings.telegram_bot_token)
+    chat_id = get_secret(settings.telegram_chat_id)
+
+    if not token or not chat_id:
         return False
         
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        "chat_id": settings.telegram_chat_id,
+        "chat_id": chat_id,
         "text": message,
         "parse_mode": "Markdown"
     }
@@ -38,7 +45,8 @@ async def send_telegram_message(message: str) -> bool:
 
 async def send_discord_message(message: str) -> bool:
     """Send a message via Discord Webhook."""
-    if not settings.discord_webhook_url:
+    webhook_url = get_secret(settings.discord_webhook_url)
+    if not webhook_url:
         return False
         
     payload = {
@@ -51,7 +59,7 @@ async def send_discord_message(message: str) -> bool:
             "Content-Type": "application/json",
             "User-Agent": "ThumberTraderBot/1.0"
         }
-        req = urllib.request.Request(settings.discord_webhook_url, data=data, headers=headers)
+        req = urllib.request.Request(webhook_url, data=data, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.getcode() in [200, 204]
 
