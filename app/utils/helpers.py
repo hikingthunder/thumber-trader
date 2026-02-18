@@ -50,3 +50,10 @@ def update_env_file(updates: dict):
             new_lines.append(f'{key}="{value}"')
 
     env_path.write_text("\n".join(new_lines) + "\n")
+    
+    # Set restrictive permissions (rw-------)
+    try:
+        os.chmod(env_path, 0o600)
+    except Exception:
+        # Best effort for permissions
+        pass

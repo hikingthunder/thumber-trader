@@ -215,7 +215,7 @@ class Settings(BaseSettings):
     # Sentiment Override
     sentiment_override_enabled: bool = False
     sentiment_source_url: str = ""
-    sentiment_api_bearer_token: str = ""
+    sentiment_api_bearer_token: SecretStr = ""
     sentiment_json_path: str = "score"
     sentiment_asset_query_param: str = "symbol"
     sentiment_refresh_seconds: int = 300
@@ -225,10 +225,10 @@ class Settings(BaseSettings):
 
     # Notifications
     notifications_enabled: bool = True
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
+    telegram_bot_token: SecretStr = ""
+    telegram_chat_id: SecretStr = ""
     telegram_whitelist_chat_id: str = ""
-    discord_webhook_url: str = ""
+    discord_webhook_url: SecretStr = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
