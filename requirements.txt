@@ -9,3 +9,4 @@ coinbase-advanced-py
 tablib[xlsx,ods]
 openpyxl
 odfpy
+cryptography

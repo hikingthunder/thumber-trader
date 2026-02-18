@@ -236,4 +236,38 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
+    @classmethod
+    def load_and_decrypt(cls):
+        """
+        Custom instantiation to handle decryption of sensitive fields.
+        """
+        from app.utils.helpers import decrypt_value
+        
+        # We manually load env vars to decrypt before Pydantic validation
+        # or we can use a validator. Let's use a validator for better integration.
+        return cls()
+
+    from pydantic import model_validator
+    @model_validator(mode='after')
+    def decrypt_sensitive_fields(self) -> 'Settings':
+        from app.utils.helpers import decrypt_value, _should_encrypt_key
+        
+        for field_name in self.model_fields:
+            # We check the env var name associated with this field if possible, 
+            # or just check common names.
+            # BaseSettings usually maps field names to UPPERCASE env vars.
+            env_name = field_name.upper()
+            if _should_encrypt_key(env_name):
+                value = getattr(self, field_name)
+                if value:
+                    # SecretStr needs special handling
+                    if hasattr(value, "get_secret_value"):
+                        raw_val = value.get_secret_value()
+                        if raw_val.startswith("ENC:"):
+                            decrypted = decrypt_value(raw_val)
+                            setattr(self, field_name, SecretStr(decrypted))
+                    elif isinstance(value, str) and value.startswith("ENC:"):
+                        setattr(self, field_name, decrypt_value(value))
+        return self
+
 settings = Settings()
