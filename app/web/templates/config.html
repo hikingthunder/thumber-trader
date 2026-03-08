@@ -1,22 +1,6 @@
 {% extends "base.html" %}
 
 {% block content %}
-<header>
-    <h1>⚙️ Configuration</h1>
-    <nav>
-        <a href="/dashboard">Dashboard</a>
-        <a href="/config" class="active">Configuration</a>
-        <a href="/backtest">Backtest</a>
-        <a href="/export">Export</a>
-        <a href="/auth/audit-log">Audit Log</a>
-        <div class="nav-divider"></div>
-        {% if user %}
-        <span class="user-badge">👤 {{ user.username }}</span>
-        {% endif %}
-        <a href="/auth/logout" class="btn btn-sm btn-outline">Logout</a>
-    </nav>
-</header>
-
 <main>
     <style>
         .config-container {
@@ -170,13 +154,20 @@
     </style>
 
     <div class="config-container">
+        <div class="card" style="margin-bottom: 24px;">
+            <h2 style="margin: 0; font-size: 1.35rem;">⚙️ Configuration</h2>
+            <p class="section-intro" style="margin: 10px 0 0;">
+                Manage exchange, risk, and automation settings for your trading engine.
+            </p>
+        </div>
+
         {% if message %}
         <div class="alert {{ 'alert-success' if success else 'alert-danger' }}">
             {{ '✅' if success else '❌' }} {{ message }}
         </div>
         {% endif %}
 
-        <form method="post" action="/config">
+        <form method="post" action="/config/save">
             <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
             <!-- API Credentials -->
             <div class="config-section">

@@ -21,7 +21,12 @@ from app.config import settings
 from app.database.db import AsyncSessionLocal
 
 # --- Configuration ---
-SECRET_KEY = settings.jwt_secret_key or os.getenv("JWT_SECRET_KEY", "default_secret_fallback_do_not_use_in_prod")
+SECRET_KEY = settings.jwt_secret_key or os.getenv("JWT_SECRET_KEY")
+if not SECRET_KEY:
+    SECRET_KEY = os.urandom(32).hex()
+    logging.getLogger(__name__).warning(
+        "JWT_SECRET_KEY not configured; using ephemeral in-memory key. Set JWT_SECRET_KEY for persistent sessions."
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "60"))
 COOKIE_NAME = "thumber_access_token"

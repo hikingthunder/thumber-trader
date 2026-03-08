@@ -1,22 +1,6 @@
 {% extends "base.html" %}
 
 {% block content %}
-<header>
-    <h1>🧪 Strategy Backtesting</h1>
-    <nav>
-        <a href="/dashboard">Dashboard</a>
-        <a href="/config">Configuration</a>
-        <a href="/backtest" class="active">Backtest</a>
-        <a href="/export">Export</a>
-        <a href="/auth/audit-log">Audit Log</a>
-        <div class="nav-divider"></div>
-        {% if user %}
-        <span class="user-badge">👤 {{ user.username }}</span>
-        {% endif %}
-        <a href="/auth/logout" class="btn btn-sm btn-outline">Logout</a>
-    </nav>
-</header>
-
 <main>
     <style>
         .backtest-container {
@@ -148,13 +132,20 @@
     </style>
 
     <div class="backtest-container">
+        <div class="card" style="margin-bottom: 24px;">
+            <h2 style="margin: 0; font-size: 1.35rem;">🧪 Strategy Backtesting</h2>
+            <p style="margin: 10px 0 0; color: var(--text-muted);">
+                Simulate strategy performance on historical market data before deploying changes.
+            </p>
+        </div>
+
         <div class="backtest-form">
             <!-- Sidebar: Parameters -->
             <aside class="params-panel">
                 <h2 style="margin-top: 0; font-size: 1.1rem; display: flex; align-items: center; gap: 8px;">
                     <span>⚙️ Parameters</span>
                 </h2>
-                <form hx-post="/api/backtest/run" hx-target="#backtest-results" hx-indicator=".results-panel">
+                <form hx-post="/backtest/run" hx-target="#backtest-results" hx-indicator=".results-panel">
                     <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
                     <div class="form-group">
                         <label>Product</label>

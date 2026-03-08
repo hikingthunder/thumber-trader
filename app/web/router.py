@@ -20,6 +20,7 @@ from app.database.models import Fill, TaxLotMatch, DailyStats
 from app.auth.security import get_current_user, log_audit
 from app.auth.models import AuditLog
 from app.utils.export import export_data, models_to_dicts, map_to_accounting, get_accounting_headers, calculate_fee_summary
+from app.utils.notifications import notify
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/web/templates")
@@ -32,6 +33,13 @@ def _client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def _require_admin(user) -> None:
+    """Enforce admin role for state-changing control endpoints."""
+    if getattr(user, "role", None) != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
 
 
 # --- Dashboard ---
@@ -68,14 +76,43 @@ async def get_config(request: Request, user=Depends(get_current_user)):
 @router.post("/config/save")
 async def save_config(request: Request, user=Depends(get_current_user)):
     """Save updated configuration to .env file."""
+    _require_admin(user)
     form_data = await request.form()
-    updates = {k: v for k, v in form_data.items() if v}
+    updates = {k.upper(): v for k, v in form_data.items() if v and k != "csrf_token"}
+
+    bool_fields = {
+        "paper_trading_mode",
+        "auto_start",
+        "kelly_allocation_enabled",
+        "liquidity_depth_check_enabled",
+        "alpha_fusion_enabled",
+        "sentiment_override_enabled",
+        "vpin_enabled",
+        "dynamic_rebalancing_enabled",
+        "strategy_stack_enabled",
+        "notifications_enabled",
+        "notify_on_trade",
+        "notify_on_grid_breach",
+        "notify_on_error",
+        "notify_on_daily_summary"
+    }
+    for field in bool_fields:
+        updates[field.upper()] = "true" if field in form_data else "false"
     
     success = update_env_file(updates)
     if success:
-        log_audit(user.id, "config_change", f"Updated keys: {list(updates.keys())}", _client_ip(request))
+        await log_audit(user.id, "config_change", f"Updated keys: {list(updates.keys())}", _client_ip(request))
         return HTMLResponse("<div class='alert alert-success'>Configuration saved. Restart required.</div>")
     return HTMLResponse("<div class='alert alert-danger'>Failed to save configuration.</div>", status_code=500)
+
+
+@router.post("/config/test-notifications")
+async def test_notifications(request: Request, user=Depends(get_current_user)):
+    """Send a test notification across currently configured channels."""
+    _require_admin(user)
+    await notify("✅ Thumber Trader notification test: channel connectivity verified.", force=True)
+    await log_audit(user.id, "notification_test", "Triggered test notification dispatch", _client_ip(request))
+    return HTMLResponse("<div class='alert alert-success'>Notification test dispatched to configured channels.</div>")
 
 
 # --- Backtesting ---
@@ -93,6 +130,7 @@ async def get_backtest(request: Request, user=Depends(get_current_user)):
 @router.post("/backtest/run")
 async def run_backtest(request: Request, user=Depends(get_current_user)):
     """Execute a backtest."""
+    _require_admin(user)
     form_data = await request.form()
     engine = BacktestEngine(
         product_id=form_data.get("product_id", settings.product_ids.split(',')[0]),
@@ -101,7 +139,7 @@ async def run_backtest(request: Request, user=Depends(get_current_user)):
         initial_capital=float(form_data.get("initial_usd", 1000))
     )
     report = await engine.run()
-    log_audit(user.id, "backtest_run", f"Product: {engine.product_id}", _client_ip(request))
+    await log_audit(user.id, "backtest_run", f"Product: {engine.product_id}", _client_ip(request))
     return templates.TemplateResponse("partials/backtest_results.html", {
         "request": request, 
         "report": report,
@@ -111,7 +149,7 @@ async def run_backtest(request: Request, user=Depends(get_current_user)):
 
 
 @router.get("/dashboard/stats", response_class=HTMLResponse)
-async def get_dashboard_stats(request: Request):
+async def get_dashboard_stats(request: Request, user=Depends(get_current_user)):
     """HTMX partial for stats widget including advanced metrics."""
     stats = await manager.get_global_stats()
     
@@ -138,7 +176,7 @@ async def get_dashboard_stats(request: Request):
 
 
 @router.get("/dashboard/orders", response_class=HTMLResponse)
-async def get_orders_table(request: Request):
+async def get_orders_table(request: Request, user=Depends(get_current_user)):
     """HTMX partial for orders table."""
     strategy = manager.strategies.get(settings.product_id)
     orders = []
@@ -154,7 +192,7 @@ async def get_orders_table(request: Request):
 
 
 @router.get("/dashboard/fills", response_class=HTMLResponse)
-async def get_fills_table(request: Request):
+async def get_fills_table(request: Request, user=Depends(get_current_user)):
     """HTMX partial for recent fills table."""
     async with AsyncSessionLocal() as session:
         stmt = select(Fill).order_by(Fill.ts.desc()).limit(20)
@@ -191,7 +229,7 @@ async def get_fills_table(request: Request):
 
 
 @router.get("/dashboard/signals", response_class=HTMLResponse)
-async def get_dashboard_signals(request: Request):
+async def get_dashboard_signals(request: Request, user=Depends(get_current_user)):
     """HTMX partial for trading signals."""
     from app.core.analysis import rsi, macd_histogram, vpin
     
@@ -227,7 +265,7 @@ async def get_dashboard_signals(request: Request):
     """
 
 @router.get("/dashboard/performance-mini", response_class=HTMLResponse)
-async def get_performance_mini(request: Request):
+async def get_performance_mini(request: Request, user=Depends(get_current_user)):
     """HTMX partial for performance summary."""
     async with AsyncSessionLocal() as session:
         cutoff = time.time() - (7 * 86400)
@@ -251,7 +289,7 @@ async def get_performance_mini(request: Request):
     """
 
 @router.get("/dashboard/health-stats")
-async def get_health_stats():
+async def get_health_stats(user=Depends(get_current_user)):
     """Unified JSON for system health card."""
     async with AsyncSessionLocal() as session:
         audit_count_stmt = select(func.count(AuditLog.id))
@@ -267,7 +305,7 @@ async def get_health_stats():
 
 
 @router.get("/dashboard/performance-data")
-async def get_performance_data():
+async def get_performance_data(user=Depends(get_current_user)):
     """Return JSON data for 24h PnL chart."""
     async with AsyncSessionLocal() as session:
         cutoff = time.time() - 86400
@@ -282,7 +320,7 @@ async def get_performance_data():
 
 
 @router.get("/dashboard/audit-events", response_class=HTMLResponse)
-async def get_recent_audit_events(request: Request):
+async def get_recent_audit_events(request: Request, user=Depends(get_current_user)):
     """HTMX partial for last 3 security events."""
     async with AsyncSessionLocal() as session:
         stmt = select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(3)
@@ -306,7 +344,7 @@ async def get_recent_audit_events(request: Request):
 
 
 @router.get("/dashboard/price")
-async def get_dashboard_price():
+async def get_dashboard_price(user=Depends(get_current_user)):
     """Return latest price for the chart."""
     status = await manager.get_global_stats()
     product_status = status.get("strategies", {}).get(settings.product_id, {})
@@ -319,6 +357,7 @@ async def get_dashboard_price():
 @router.post("/dashboard/control/{action}")
 async def control_bot(action: str, request: Request, user=Depends(get_current_user)):
     """Start or stop the trading engine."""
+    _require_admin(user)
     success = False
     if action == "start":
         success = await manager.start()
@@ -326,7 +365,7 @@ async def control_bot(action: str, request: Request, user=Depends(get_current_us
         success = await manager.stop()
     
     if success:
-        log_audit(user.id, f"bot_{action}", f"Engine {action}ed manually", _client_ip(request))
+        await log_audit(user.id, f"bot_{action}", f"Engine {action}ed manually", _client_ip(request))
     
     return await get_dashboard_stats(request)
 
@@ -338,10 +377,18 @@ async def get_export_view(request: Request, user=Depends(get_current_user)):
     context = {
         "request": request,
         "user": user,
+        "product_id": settings.product_id,
+        "paper_trading": settings.paper_trading_mode,
         "formats": ["csv", "xlsx", "ods"],
         "tax_methods": ["FIFO", "LIFO", "HIFO"]
     }
     return templates.TemplateResponse("export.html", context)
+
+
+@router.get("/dashboard/exchange-health")
+async def get_exchange_health(user=Depends(get_current_user)):
+    """Expose current exchange connectivity metadata for operational visibility."""
+    return manager.get_exchange_health()
 
 
 @router.post("/export/generate")
@@ -374,7 +421,7 @@ async def generate_export(request: Request, user=Depends(get_current_user)):
         }
 
     output = export_data(data, file_format)
-    log_audit(user.id, "data_export", f"Format: {file_format}, Method: {tax_method}", _client_ip(request))
+    await log_audit(user.id, "data_export", f"Format: {file_format}, Method: {tax_method}", _client_ip(request))
     
     media_types = {
         "csv": "text/csv",

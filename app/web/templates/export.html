@@ -1,31 +1,14 @@
 {% extends "base.html" %}
 
 {% block content %}
-<header>
-    <div>
-        <h1>📦 Data Export</h1>
-        <div style="font-size: 0.9rem; color: #94a3b8;">
-            Product: <span style="color: white;">{{ product_id }}</span> |
-            Mode: <span style="color: {{ 'orange' if paper_trading else 'white' }};">
-                {{ 'PAPER TRADING' if paper_trading else 'LIVE' }}
-            </span>
-        </div>
-    </div>
-    <nav>
-        <a href="/dashboard">Dashboard</a>
-        <a href="/config">Configuration</a>
-        <a href="/backtest">Backtest</a>
-        <a href="/export" class="active">Export</a>
-        <a href="/auth/audit-log">Audit Log</a>
-        <div class="nav-divider"></div>
-        {% if user %}
-        <span class="user-badge">👤 {{ user.username }}</span>
-        {% endif %}
-        <a href="/auth/logout" class="btn btn-sm btn-outline">Logout</a>
-    </nav>
-</header>
-
 <main>
+    <div class="card" style="margin-bottom: 24px;">
+        <h2 style="margin: 0; font-size: 1.35rem;">📦 Data Export</h2>
+        <p style="margin: 10px 0 0; color: var(--text-muted);">
+            Export fills, tax lots, and daily statistics for accounting and compliance workflows.
+        </p>
+    </div>
+
     {% include "partials/export_controls.html" %}
 
     <div class="card mt-4">

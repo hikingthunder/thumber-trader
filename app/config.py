@@ -285,10 +285,10 @@ class Settings(BaseSettings):
                     # SecretStr needs special handling
                     if hasattr(value, "get_secret_value"):
                         raw_val = value.get_secret_value()
-                        if raw_val.startswith("ENC:"):
+                        if raw_val.startswith("ENC:") or raw_val.startswith("AES:"):
                             decrypted = decrypt_value(raw_val)
                             setattr(self, field_name, SecretStr(decrypted))
-                    elif isinstance(value, str) and value.startswith("ENC:"):
+                    elif isinstance(value, str) and (value.startswith("ENC:") or value.startswith("AES:")):
                         setattr(self, field_name, decrypt_value(value))
         return self
 
