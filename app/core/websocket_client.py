@@ -15,8 +15,9 @@ class WSUserClient:
     Coinbase Advanced Trade WebSocket Client.
     Handles 'user' channel for fills and 'ticker' channel for price updates.
     """
-    # For Advanced Trade, the user endpoint can handle all channels if authenticated
-    URL = "wss://advanced-trade-ws-user.coinbase.com"
+    # Dedicated Endpoints
+    MARKET_URL = "wss://advanced-trade-ws.coinbase.com"
+    USER_URL = "wss://advanced-trade-ws-user.coinbase.com"
 
     def __init__(self, api_key: str, api_secret: str):
         self.api_key = api_key
@@ -26,19 +27,19 @@ class WSUserClient:
         if "-----BEGIN" in self.api_secret and "\\n" in self.api_secret:
             self.api_secret = self.api_secret.replace("\\n", "\n")
 
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
-        self.subscriptions: Set[str] = set()
+        self.market_ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.user_ws: Optional[websockets.WebSocketClientProtocol] = None
+        
         self.handlers: Dict[str, List[Callable]] = {
             "fills": [],
             "ticker": [],
             "l2": []
         }
         self.running = False
-        self.retry_count = 0
-        self.max_retries = 10
         
         # Sequence tracking
         self.last_sequences: Dict[str, int] = {}
+        self._msg_count = 0
 
     def add_handler(self, channel: str, handler: Callable):
         if channel in self.handlers:
@@ -46,60 +47,78 @@ class WSUserClient:
 
     async def start(self):
         self.running = True
+        logger.info("Starting Dual WebSocket Client...")
+        
+        # Run both loops concurrently
+        await asyncio.gather(
+            self._connection_loop("market", self.MARKET_URL, ["ticker", "l2_data"]),
+            self._connection_loop("user", self.USER_URL, ["user"])
+        )
+
+    async def _connection_loop(self, name: str, url: str, channels: List[str]):
+        """Maintain a persistent connection to a specific endpoint."""
+        retry_count = 0
         while self.running:
             try:
-                # Use the user-authenticated endpoint which handles both public and private data
-                async with websockets.connect(self.URL) as ws:
-                    self.ws = ws
-                    self.retry_count = 0
-                    logger.info(f"WebSocket connected to {self.URL}")
+                async with websockets.connect(url) as ws:
+                    if name == "market":
+                        self.market_ws = ws
+                    else:
+                        self.user_ws = ws
+                        
+                    retry_count = 0
+                    logger.info(f"WebSocket connected to {name.upper()} endpoint: {url}")
                     
                     # Resubscribe to channels
                     product_ids = settings.product_ids.split(",")
-                    
-                    # Subscribe to public and private channels
-                    # Advanced Trade V3 requires authentication for ALL channels 
-                    # if using a Cloud API Key on the user endpoint.
-                    await self._send_subscription(product_ids, "ticker")
-                    await self._send_subscription(product_ids, "l2_data")
-                    await self._send_subscription(product_ids, "user")
+                    for channel in channels:
+                        # User channel doesn't strictly need product_ids and it's safer to omit if auth fails
+                        pids = product_ids if channel != "user" else []
+                        await self._send_subscription(ws, pids, channel, name)
                     
                     async for message in ws:
-                        await self._handle_message(message)
+                        await self._handle_message(message, name)
                         
             except Exception as e:
-                logger.error(f"WebSocket error: {e}")
+                logger.error(f"WebSocket {name.upper()} connection error: {e}")
                 if self.running:
-                    self.retry_count += 1
-                    wait = min(60, 2 ** self.retry_count)
-                    logger.info(f"Retrying WebSocket in {wait} seconds...")
+                    retry_count += 1
+                    wait = min(60, 2 ** retry_count)
+                    logger.info(f"Retrying {name.upper()} WebSocket in {wait} seconds...")
                     await asyncio.sleep(wait)
 
     async def stop(self):
         self.running = False
-        if self.ws:
-            await self.ws.close()
+        if self.market_ws:
+            await self.market_ws.close()
+        if self.user_ws:
+            await self.user_ws.close()
 
-    async def _send_subscription(self, product_ids: List[str], channel: str):
+    async def _send_subscription(self, ws: websockets.WebSocketClientProtocol, product_ids: List[str], channel: str, name: str):
         """
         Send a subscription message.
         Uses JWT authentication for Cloud API Keys (standard for Adv Trade).
         """
         try:
             from coinbase import jwt_generator
-            # Correct function found via inspection: build_ws_jwt
             jwt_token = jwt_generator.build_ws_jwt(self.api_key, self.api_secret)
             
             subscribe_msg = {
                 "type": "subscribe",
-                "channel": channel,
-                "product_ids": product_ids,
-                "jwt": jwt_token
+                "channel": channel
             }
-            await self.ws.send(json.dumps(subscribe_msg))
-            logger.info(f"Sent authenticated subscription for {channel} product_ids: {product_ids}")
+            if product_ids:
+                subscribe_msg["product_ids"] = product_ids
+            
+            # Only use JWT for USER endpoint (private data)
+            # Market endpoint channels (ticker, l2_data) are public and often reject JWT
+            if name == "user":
+                subscribe_msg["jwt"] = jwt_token
+
+            await ws.send(json.dumps(subscribe_msg))
+            logger.info(f"Sent {'authenticated ' if name == 'user' else ''}{name.upper()} subscription for {channel}")
         except Exception as e:
-            logger.error(f"Failed to generate JWT for subscription: {e}")
+            logger.error(f"Failed to generate JWT for {name.upper()} subscription: {e}")
             # Fallback to HMAC signature for legacy API Keys
             timestamp = str(int(time.time()))
             import hmac
@@ -119,26 +138,30 @@ class WSUserClient:
                 "timestamp": timestamp,
                 "signature": signature
             }
-            await self.ws.send(json.dumps(subscribe_msg))
-            logger.info(f"Sent Legacy signature subscription for {channel}")
+            await ws.send(json.dumps(subscribe_msg))
+            logger.info(f"Sent Legacy signature {name.upper()} subscription for {channel}")
 
-    async def _handle_message(self, message: str):
-        data = json.loads(message)
+    async def _handle_message(self, message: str, name: str):
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError:
+            logger.error(f"Failed to decode message from {name.upper()}: {message[:100]}")
+            return
+
         msg_type = data.get("type")
         channel = data.get("channel")
         
         if msg_type == "error":
-            logger.error(f"Coinbase WS Error: {data.get('message')} (Reason: {data.get('reason')})")
+            logger.error(f"Coinbase WS {name.upper()} Error: {data.get('message')} (Reason: {data.get('reason')})")
             return
 
         if msg_type == "subscriptions":
-             logger.info(f"Confirmed subscriptions: {data.get('channels')}")
+             logger.info(f"Confirmed {name.upper()} subscriptions: {data.get('channels')}")
              return
 
         # Debug log for throughput (every 100th message or specific channels)
-        if not hasattr(self, "_msg_count"): self._msg_count = 0
         self._msg_count += 1
-        if self._msg_count % 100 == 0 or channel in ["ticker", "user"]:
+        if self._msg_count % 500 == 0 or channel in ["user"]:
             logger.debug(f"WS Message: channel={channel}, type={msg_type}")
 
         # sequence reconciliation if supported by channel
@@ -147,9 +170,6 @@ class WSUserClient:
             expected = self.last_sequences.get(channel, sequence - 1) + 1
             if sequence > expected:
                 logger.warning(f"Gap detected in {channel} sequence: expected {expected}, got {sequence}")
-                # Trigger reconciliation event
-                for handler in self.handlers.get("reconcile", []):
-                    await handler(channel, expected, sequence)
             self.last_sequences[channel] = sequence
 
         if channel == "user":

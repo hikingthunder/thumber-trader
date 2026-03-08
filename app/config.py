@@ -248,7 +248,8 @@ class Settings(BaseSettings):
     notify_on_error: bool = True
     notify_on_daily_summary: bool = True
 
-    # TradingView Webhook Inbound
+    # Security
+    jwt_secret_key: Optional[str] = None
     tradingview_webhook_secret: Optional[SecretStr] = None
 
     model_config = SettingsConfigDict(

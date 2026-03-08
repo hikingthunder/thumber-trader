@@ -81,7 +81,7 @@ class StrategyManager:
         """Start all registered strategies."""
         if self.running:
             logger.warning("StrategyManager is already running.")
-            return
+            return True
 
         self.running = True
         logger.info("Starting strategies...")

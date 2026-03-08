@@ -17,12 +17,11 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database.db import AsyncSessionLocal
 
-logger = logging.getLogger(__name__)
-
 # --- Configuration ---
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", os.urandom(32).hex())
+SECRET_KEY = settings.jwt_secret_key or os.getenv("JWT_SECRET_KEY", "default_secret_fallback_do_not_use_in_prod")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "60"))
 COOKIE_NAME = "thumber_access_token"
