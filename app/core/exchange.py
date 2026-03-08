@@ -79,22 +79,36 @@ class CoinbaseExchange:
                     return getattr(obj, key, default)
 
                 currency = get_v(account, "currency")
-                available_obj = get_v(account, "available_balance")
                 
-                if currency and available_obj:
-                    available_val = get_v(available_obj, "value", 0)
-                    balances[str(currency)] = Decimal(str(available_val))
+                # Available balance can be a nested object or a flat string/number
+                available_balance = get_v(account, "available_balance")
+                
+                available_val = 0
+                if isinstance(available_balance, (dict, object)) and not isinstance(available_balance, (str, int, float, Decimal)):
+                    available_val = get_v(available_balance, "value", 0)
+                elif available_balance is not None:
+                    available_val = available_balance
+                
+                if currency:
+                    try:
+                        balances[str(currency)] = Decimal(str(available_val))
+                    except Exception as e:
+                        logging.warning(f"Could not parse balance for {currency}: {available_val} - {e}")
             
             # Debug log for a few balances to verify
             if balances:
-                sample = {k: str(v) for k, v in list(balances.items())[:3]}
-                logging.info(f"Sample balances: {sample}")
+                # Filter for non-zero or just log the first 3
+                sample = {k: str(v) for k, v in list(balances.items())[:5]}
+                logging.info(f"Sample balances (first 5): {sample}")
             else:
-                logging.warning("No non-zero balances found or parsing failed.")
+                logging.warning("No balances found or parsing failed for all accounts.")
+                # Log the first account structure to help debug if it returns nothing
+                if accounts:
+                    logging.info(f"First account raw structure: {accounts[0]}")
                 
             return balances
         except Exception as e:
-            logging.error(f"Error fetching account balances: {e}")
+            logging.error(f"Error fetching account balances: {e}", exc_info=True)
             return {}
 
     async def create_order(self, 

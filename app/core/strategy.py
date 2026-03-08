@@ -399,6 +399,7 @@ class GridStrategy(StrategyEngine):
                 client_order_id = f"paper-{uuid.uuid4()}"
                 # Mimic response
                 response = {"id": client_order_id, "status": "open"}
+                logger.info(f"[PAPER] Simulating {side} order placement: {client_order_id} @ {price}")
             else:
                 # Real API call
                 config = {
@@ -439,9 +440,11 @@ class GridStrategy(StrategyEngine):
                 }
                 self.active_order_ids.add(client_order_id)
                 logger.info(f"Placed {side} order {client_order_id} @ {price}")
+            else:
+                logger.error(f"Failed to get order_id from exchange for {side} {self.product_id} @ {price}")
 
         except Exception as e:
-            logger.error(f"Failed to place {side} limit order: {e}")
+            logger.error(f"Failed to place {side} limit order: {e}", exc_info=True)
 
     def _analyze_market(self) -> Dict[str, Any]:
         """Calculate indicators using analysis module."""
@@ -612,16 +615,21 @@ class GridStrategy(StrategyEngine):
              
              logger.info(f"Initializing {settings.grid_spacing_mode.capitalize()} Grid with Alpha Fusion (Sentiment: {sentiment})")
              
+             placed_count = 0
              for i, level in enumerate(self.grid_levels):
                   # Bias placement based on sentiment: tilt grid towards buy/sell
                   if level > mid_price * (Decimal("1.001") - sentiment * Decimal("0.005")): 
                        side = "SELL"
                        size = (base_notional / level)
                        await self._place_limit_order(side, level, size, i)
+                       placed_count += 1
                   elif level < mid_price * (Decimal("0.999") - sentiment * Decimal("0.005")): 
                        side = "BUY"
                        size = (base_notional / level)
                        await self._place_limit_order(side, level, size, i)
+                       placed_count += 1
+             
+             logger.info(f"Grid initialization complete. Placed {placed_count} orders.")
 
     async def _execute_basic_grid_logic(self, metrics: Dict[str, Any]):
         """Legacy/Basic grid logic for when alpha fusion is disabled."""
