@@ -81,10 +81,12 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # --- Middleware Stack (order matters: last added = first executed) ---
 # CORS
+cors_allowed_origins = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+allow_credentials = "*" not in cors_allowed_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("CORS_ALLOWED_ORIGINS", "*")],
-    allow_credentials=True,
+    allow_origins=cors_allowed_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

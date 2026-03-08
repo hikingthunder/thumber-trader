@@ -427,8 +427,8 @@
         lucide.createIcons();
 
         // HTMX CSRF Configuration
-        document.body.addEventListener('configRequest.htmx', (event) => {
-            const token = getCookie('csrf_token');
+        document.body.addEventListener('htmx:configRequest', (event) => {
+            const token = getCookie('thumber_csrf_token');
             if (token) {
                 event.detail.headers['X-CSRF-Token'] = token;
             }
@@ -452,7 +452,7 @@
             try {
                 const resp = await fetch('/api/emergency/kill', { 
                     method: 'POST',
-                    headers: { 'X-CSRF-Token': getCookie('csrf_token') }
+                    headers: { 'X-CSRF-Token': getCookie('thumber_csrf_token') }
                 });
                 const data = await resp.json();
                 alert('Kill switch activated: ' + data.message);

@@ -1,143 +1,61 @@
-<div class="card" style="grid-column: span 2;">
-    <h2>Export Data</h2>
-    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem;">
-        <!-- Standard Exports -->
-        <div class="export-group">
-            <h3>Fills / Trades</h3>
-            <div class="btn-group">
-                <a href="/export/fills/csv" class="btn btn-secondary">CSV</a>
-                <a href="/export/fills/xlsx" class="btn btn-secondary">XLSX</a>
-                <a href="/export/fills/ods" class="btn btn-secondary">ODS</a>
+<div class="card">
+    <h2>Export Dataset Bundle</h2>
+    <p style="color: var(--text-muted); margin-top: -4px;">
+        Generate a complete export package containing fills, tax lot matches, daily performance, and fee summaries.
+    </p>
+
+    <form method="post" action="/export/generate" style="display: grid; gap: 16px; margin-top: 16px;">
+        <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
+
+        <div class="export-grid">
+            <div class="form-group">
+                <label for="format">File Format</label>
+                <select id="format" name="format" required>
+                    {% for fmt in formats %}
+                    <option value="{{ fmt }}">{{ fmt.upper() }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="tax_method">Tax Lot Method</label>
+                <select id="tax_method" name="tax_method" required>
+                    {% for method in tax_methods %}
+                    <option value="{{ method }}">{{ method }}</option>
+                    {% endfor %}
+                </select>
             </div>
         </div>
 
-        <div class="export-group">
-            <h3>Tax matches</h3>
-            <div class="btn-group">
-                <a href="/export/tax_matches/csv" class="btn btn-secondary">CSV</a>
-                <a href="/export/tax_matches/xlsx" class="btn btn-secondary">XLSX</a>
-                <a href="/export/tax_matches/ods" class="btn btn-secondary">ODS</a>
-            </div>
+        <div style="display: flex; justify-content: flex-end;">
+            <button type="submit" class="btn btn-success">⬇ Generate Export</button>
         </div>
-
-        <div class="export-group">
-            <h3>Daily Stats</h3>
-            <div class="btn-group">
-                <a href="/export/stats/csv" class="btn btn-secondary">CSV</a>
-                <a href="/export/stats/xlsx" class="btn btn-secondary">XLSX</a>
-                <a href="/export/stats/ods" class="btn btn-secondary">ODS</a>
-            </div>
-        </div>
-
-        <!-- Accounting Exports -->
-        <div class="export-group">
-            <h3>Accounting (QB/Quicken)</h3>
-            <div class="btn-group">
-                <a href="/export/accounting_fills/csv" class="btn btn-primary">Fills CSV</a>
-                <a href="/export/accounting_tax/csv" class="btn btn-primary">Tax Lots CSV</a>
-            </div>
-        </div>
-
-        <!-- Financial Software -->
-        <div class="export-group">
-            <h3>📥 Quicken (QFX)</h3>
-            <div class="btn-group">
-                <a href="/export/fills/qfx" class="btn btn-accent">Fills .QFX</a>
-                <a href="/export/tax_matches/qfx" class="btn btn-accent">Tax .QFX</a>
-            </div>
-        </div>
-
-        <div class="export-group">
-            <h3>📥 QuickBooks (QBO)</h3>
-            <div class="btn-group">
-                <a href="/export/fills/qbo" class="btn btn-accent">Fills .QBO</a>
-                <a href="/export/tax_matches/qbo" class="btn btn-accent">Tax .QBO</a>
-            </div>
-        </div>
-
-        <div class="export-group">
-            <h3>📥 TurboTax (8949)</h3>
-            <div class="btn-group">
-                <a href="/export/tax_matches/turbotax" class="btn btn-accent">Form 8949 CSV</a>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Fee Summary Panel -->
-<div class="card mt-4"
-     hx-get="/api/fee-summary"
-     hx-trigger="load"
-     hx-target="#fee-summary-content">
-    <h2>💰 Fee Summary</h2>
-    <div id="fee-summary-content">
-        <p style="color: #94a3b8;">Loading fee breakdown...</p>
-    </div>
+    </form>
 </div>
 
 <style>
-    .export-group h3 {
-        font-size: 0.9rem;
-        color: #94a3b8;
-        margin-bottom: 0.5rem;
-    }
-
-    .btn-group {
-        display: flex;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-    }
-
-    .btn-secondary {
-        background-color: #334155;
-        color: white;
-    }
-
-    .btn-secondary:hover {
-        background-color: #475569;
-    }
-
-    .btn-accent {
-        background: linear-gradient(135deg, #0ea5e9, #6366f1);
-        color: white;
-        border: none;
-        padding: 6px 12px;
-        border-radius: 6px;
-        font-size: 0.8rem;
-        text-decoration: none;
-        display: inline-block;
-        cursor: pointer;
-        transition: opacity 0.2s;
-    }
-
-    .btn-accent:hover {
-        opacity: 0.85;
-    }
-
-    .fee-grid {
+    .export-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px;
     }
 
-    .fee-stat {
-        text-align: center;
-        padding: 12px;
-        background: rgba(255,255,255,0.03);
-        border: 1px solid var(--border-color);
-        border-radius: 8px;
-    }
-
-    .fee-stat .value {
-        font-size: 1.1rem;
-        font-weight: 700;
+    .form-group label {
         display: block;
+        margin-bottom: 8px;
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 700;
     }
 
-    .fee-stat .label {
-        font-size: 0.7rem;
-        color: var(--text-muted);
-        text-transform: uppercase;
-        margin-top: 4px;
+    .form-group select {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        background: #020617;
+        color: var(--text-color);
     }
 </style>

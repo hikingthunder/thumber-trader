@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from decimal import Decimal
 
 from app.config import settings
@@ -32,6 +32,9 @@ class StrategyManager:
         # Circuit Breaker state
         self.latency_history: List[float] = []
         self.circuit_open = False
+        self.last_balance_refresh_ts: float = 0.0
+        self.last_ticker_ts: float = 0.0
+        self.last_exchange_error: Optional[str] = None
 
     async def initialize(self):
         """Initialize connections and strategies."""
@@ -60,8 +63,11 @@ class StrategyManager:
 
             # Basic connectivity check
             accounts = await self.exchange.get_account_balances()
+            self.last_balance_refresh_ts = time.time()
+            self.last_exchange_error = None
             logger.info(f"Connected to Coinbase. Found {len(accounts)} accounts.")
         except Exception as e:
+            self.last_exchange_error = str(e)
             logger.error(f"Failed to connect to Exchange: {e}")
             raise
 
@@ -146,7 +152,10 @@ class StrategyManager:
         if self.exchange:
             try:
                 balances = await self.exchange.get_account_balances()
+                self.last_balance_refresh_ts = time.time()
+                self.last_exchange_error = None
             except Exception as e:
+                self.last_exchange_error = str(e)
                 logger.error(f"Failed to get balances: {e}")
         
         # 2. Get Strategy Stats
@@ -183,6 +192,22 @@ class StrategyManager:
             }
         }
 
+    def get_exchange_health(self) -> Dict[str, Any]:
+        """Return Coinbase connectivity health and data freshness information."""
+        latest_latency_ms = None
+        if self.latency_history:
+            latest_latency_ms = round(self.latency_history[-1] * 1000, 2)
+
+        return {
+            "exchange_connected": self.exchange is not None,
+            "running": self.running,
+            "last_balance_refresh_ts": self.last_balance_refresh_ts,
+            "last_ticker_ts": self.last_ticker_ts,
+            "latest_latency_ms": latest_latency_ms,
+            "circuit_open": self.circuit_open,
+            "last_error": self.last_exchange_error
+        }
+
 
     async def _handle_ws_ticker(self, ticker: Dict[str, Any]):
         """Route WS ticker event to strategy and broadcast to browser."""
@@ -214,6 +239,7 @@ class StrategyManager:
                 "price": float(ticker.get("price", 0)),
                 "time": t_val
             })
+            self.last_ticker_ts = float(t_val)
         except Exception as e:
             logger.error(f"Error in _handle_ws_ticker: {e}")
 

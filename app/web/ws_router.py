@@ -2,7 +2,7 @@
 import json
 import logging
 from typing import List, Dict, Any
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.auth.security import decode_access_token, COOKIE_NAME
 from app.core.manager import manager
 
@@ -49,17 +49,14 @@ browser_ws_manager = ConnectionManager()
 
 @ws_router.websocket("/ws/dashboard")
 async def dashboard_websocket(
-    websocket: WebSocket,
-    token: str = Query(None)
+    websocket: WebSocket
 ):
     """
     WebSocket endpoint for real-time dashboard updates.
-    Expects JWT token in query string for authentication.
+    Uses the authenticated session cookie for authentication.
     """
     # 1. Authenticate
-    if not token:
-        # Check cookies as backup
-        token = websocket.cookies.get(COOKIE_NAME)
+    token = websocket.cookies.get(COOKIE_NAME)
         
     if not token:
         logger.warning("WebSocket connection rejected: No token found in Query or Cookies")
@@ -68,7 +65,7 @@ async def dashboard_websocket(
 
     payload = decode_access_token(token)
     if not payload:
-        logger.warning(f"WebSocket connection rejected: Invalid or expired token: {token[:10]}...")
+        logger.warning("WebSocket connection rejected: Invalid or expired token")
         await websocket.close(code=4001)
         return
 

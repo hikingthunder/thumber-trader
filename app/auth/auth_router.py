@@ -109,6 +109,7 @@ async def login(
 
     await log_audit(user.id, "login_success", "", ip, ua)
 
+    secure_cookie = request.url.scheme == "https"
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
         key=COOKIE_NAME,
@@ -116,20 +117,17 @@ async def login(
         httponly=True,
         samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        secure=False  # Set to True in production with HTTPS
-    )
-    # Set non-HttpOnly copy for WebSocket handshake in some environments
-    response.set_cookie(
-        key="thumber_token_js",
-        value=token,
-        httponly=False,
-        samesite="lax",
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        secure=False
+        secure=secure_cookie
     )
     # Set CSRF token
     csrf = generate_csrf_token()
-    response.set_cookie(key=CSRF_COOKIE_NAME, value=csrf, samesite="lax", max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        secure=secure_cookie
+    )
     return response
 
 
