@@ -35,6 +35,13 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _require_admin(user) -> None:
+    """Enforce admin role for state-changing control endpoints."""
+    if getattr(user, "role", None) != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+
 # --- Dashboard ---
 @router.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard(request: Request, user=Depends(get_current_user)):
@@ -69,6 +76,7 @@ async def get_config(request: Request, user=Depends(get_current_user)):
 @router.post("/config/save")
 async def save_config(request: Request, user=Depends(get_current_user)):
     """Save updated configuration to .env file."""
+    _require_admin(user)
     form_data = await request.form()
     updates = {k.upper(): v for k, v in form_data.items() if v and k != "csrf_token"}
 
@@ -101,6 +109,7 @@ async def save_config(request: Request, user=Depends(get_current_user)):
 @router.post("/config/test-notifications")
 async def test_notifications(request: Request, user=Depends(get_current_user)):
     """Send a test notification across currently configured channels."""
+    _require_admin(user)
     await notify("✅ Thumber Trader notification test: channel connectivity verified.", force=True)
     await log_audit(user.id, "notification_test", "Triggered test notification dispatch", _client_ip(request))
     return HTMLResponse("<div class='alert alert-success'>Notification test dispatched to configured channels.</div>")
@@ -121,6 +130,7 @@ async def get_backtest(request: Request, user=Depends(get_current_user)):
 @router.post("/backtest/run")
 async def run_backtest(request: Request, user=Depends(get_current_user)):
     """Execute a backtest."""
+    _require_admin(user)
     form_data = await request.form()
     engine = BacktestEngine(
         product_id=form_data.get("product_id", settings.product_ids.split(',')[0]),
@@ -347,6 +357,7 @@ async def get_dashboard_price(user=Depends(get_current_user)):
 @router.post("/dashboard/control/{action}")
 async def control_bot(action: str, request: Request, user=Depends(get_current_user)):
     """Start or stop the trading engine."""
+    _require_admin(user)
     success = False
     if action == "start":
         success = await manager.start()
