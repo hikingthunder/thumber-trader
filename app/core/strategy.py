@@ -13,6 +13,7 @@ from app.database.db import get_db, AsyncSessionLocal
 from app.database.models import Order, Fill, DailyStats, TaxLot, TaxLotMatch
 from app.core.state import SharedRiskState
 from app.core import analysis
+from app.core import metrics as quant_metrics
 from app.utils.notifications import notify
 from sqlalchemy import select, update, delete
 from sqlalchemy.orm import Session
@@ -27,20 +28,23 @@ class GridStrategy(StrategyEngine):
         self.running = False
         self.paused = False
         
+        # Performance Tracking
+        self.equity_history: List[Decimal] = []
+        self.realized_pnl = Decimal("0")
+        self.last_equity_update: float = 0.0
+        
         # Quantitative tools
         self.kalman = analysis.KalmanFilter()
         
         # State variables
         self.grid_levels: List[Decimal] = []
+        self.grid_midpoint: Decimal = Decimal("0")  # Tracks where the grid was anchored
         self.orders: Dict[str, Dict[str, Any]] = {} # Cache of active orders
         self.active_order_ids: set = set()
         
         # Market data cache
         self.last_price: Decimal = Decimal("0")
         self.candles: List[Tuple[int, Decimal, Decimal, Decimal, Decimal]] = [] # OHLCV
-        
-        # PnL State
-        self.realized_pnl: Decimal = Decimal("0")
         
         # Configuration shortcuts
         self.base_currency = product_id.split("-")[0]
@@ -84,7 +88,11 @@ class GridStrategy(StrategyEngine):
                 # 4. Core Logic: Place/Cancel Orders
                 await self._execute_grid_logic(metrics)
 
-                # 5. Risk Checks
+                # 5. Dynamic Rebalancing
+                if settings.dynamic_rebalancing_enabled:
+                    await self._check_rebalance(metrics)
+
+                # 6. Risk Checks
                 await self._check_risk_parameters()
                 
                 # Sleep for remaining poll interval
@@ -181,13 +189,11 @@ class GridStrategy(StrategyEngine):
             
             # Identify filled orders (present in local but missing in API open orders)
             # Note: This is a simplified check. A robust system checks return values or a fill feed.
+            # For now, treat as filled and verify with fills endpoint if possible or move on.
+            # Using get_order would be safer but more API calls.
             filled_ids = []
             for oid in list(self.active_order_ids):
                 if oid not in api_order_ids:
-                    # Order is no longer open in API. It might be filled or canceled.
-                    # We assume filled if we didn't cancel it ourselves (or check fills endpoint).
-                    # For now, treat as filled and verify with fills endpoint if possible or move on.
-                    # Using get_order would be safer but more API calls.
                     filled_ids.append(oid)
             
             for oid in filled_ids:
@@ -600,6 +606,7 @@ class GridStrategy(StrategyEngine):
         # Initial Grid Placement
         if not self.orders and self.running and self.last_price > 0:
              mid_price = self.last_price
+             self.grid_midpoint = mid_price
              self.grid_levels = self._calculate_grid_levels(mid_price, current_band_pct)
              
              logger.info(f"Initializing {settings.grid_spacing_mode.capitalize()} Grid with Alpha Fusion (Sentiment: {sentiment})")
@@ -626,6 +633,7 @@ class GridStrategy(StrategyEngine):
 
         if not self.orders and self.running and self.last_price > 0:
              mid_price = self.last_price
+             self.grid_midpoint = mid_price
              self.grid_levels = self._calculate_grid_levels(mid_price, current_band_pct)
              for i, level in enumerate(self.grid_levels):
                   if level > mid_price * Decimal("1.001"): 
@@ -638,7 +646,7 @@ class GridStrategy(StrategyEngine):
                        await self._place_limit_order(side, level, size, i)
 
     async def get_stats(self) -> Dict[str, Any]:
-        """Return strategy statistics including PnL."""
+        """Return strategy statistics including advanced quantitative metrics."""
         unrealized_pnl = Decimal("0")
         inventory_base = Decimal("0")
         
@@ -656,11 +664,21 @@ class GridStrategy(StrategyEngine):
                     remaining = Decimal(lot.remaining_base_size)
                     buy_price = Decimal(lot.buy_price)
                     
-                    # Value diff
-                    current_val = remaining * self.last_price
-                    cost_basis = remaining * buy_price
-                    unrealized_pnl += (current_val - cost_basis)
+                    unrealized_pnl += (remaining * self.last_price) - (remaining * buy_price)
                     inventory_base += remaining
+
+        # Calculate Advanced Metrics
+        dd = quant_metrics.calculate_drawdown(self.equity_history)
+        
+        # Returns for Sharpe
+        rets = []
+        if len(self.equity_history) > 1:
+            for i in range(1, len(self.equity_history)):
+                if self.equity_history[i-1] > 0:
+                    rets.append((self.equity_history[i] / self.equity_history[i-1]) - 1)
+        
+        sharpe = quant_metrics.calculate_sharpe_ratio(rets)
+        recovery_time = quant_metrics.calculate_time_to_recovery(self.equity_history)
 
         return {
             "running": self.running,
@@ -668,8 +686,79 @@ class GridStrategy(StrategyEngine):
             "last_price": self.last_price,
             "realized_pnl": self.realized_pnl,
             "unrealized_pnl": unrealized_pnl,
-            "inventory_base": inventory_base
+            "inventory_base": inventory_base,
+            "drawdown_pct": dd["current"] * 100,
+            "max_drawdown_pct": dd["max"] * 100,
+            "sharpe_ratio": sharpe,
+            "recovery_time_hours": recovery_time
         }
+
+    async def _check_rebalance(self, metrics: Dict[str, Any]):
+        """Dynamic rebalancing: shift or widen grid when price drifts out of range."""
+        if self.grid_midpoint <= 0 or self.last_price <= 0 or not self.orders:
+            return
+
+        drift_pct = abs(self.last_price - self.grid_midpoint) / self.grid_midpoint
+        if drift_pct < settings.rebalance_threshold_pct:
+            return  # Within tolerance
+
+        mode = settings.rebalance_mode
+        logger.info(f"Rebalance triggered: price drifted {drift_pct*100:.2f}% from grid midpoint. Mode: {mode}")
+
+        if mode == "trend-follow":
+            # Cancel all stale orders and re-anchor grid at current price
+            order_ids = list(self.active_order_ids)
+            if order_ids:
+                try:
+                    if not settings.paper_trading_mode:
+                        await self.exchange.cancel_orders(order_ids)
+                    # Clear local state
+                    self.orders.clear()
+                    self.active_order_ids.clear()
+                    # Clean DB
+                    async with AsyncSessionLocal() as session:
+                        from sqlalchemy import delete as sql_delete
+                        await session.execute(
+                            sql_delete(Order).where(Order.product_id == self.product_id)
+                        )
+                        await session.commit()
+                    
+                    msg = f"🔄 *Grid Rebalanced (Trend-Follow)*: Re-anchoring at ${self.last_price:,.2f} (was ${self.grid_midpoint:,.2f})"
+                    logger.info(msg)
+                    await notify(msg)
+                    # Next loop iteration will place fresh grid via _execute_grid_logic
+                except Exception as e:
+                    logger.error(f"Rebalance cancel failed: {e}")
+
+        elif mode == "mean-reversion":
+            # Widen the grid bands instead of moving center
+            # Add extra orders at the extremes
+            if self.grid_levels:
+                current_band = settings.grid_band_pct
+                widened_band = current_band * Decimal("1.3")  # Widen by 30%
+                new_levels = self._calculate_grid_levels(self.grid_midpoint, widened_band)
+                
+                # Find levels that are NEW (not in existing grid)
+                existing_prices = {o["price"] for o in self.orders.values()}
+                new_orders_placed = 0
+                for i, level in enumerate(new_levels):
+                    # Skip if we already have an order near this level
+                    if any(abs(level - ep) / level < Decimal("0.001") for ep in existing_prices):
+                        continue
+                    if level > self.last_price:
+                        size = settings.base_order_notional_usd / level
+                        await self._place_limit_order("SELL", level, size, i)
+                        new_orders_placed += 1
+                    elif level < self.last_price:
+                        size = settings.base_order_notional_usd / level
+                        await self._place_limit_order("BUY", level, size, i)
+                        new_orders_placed += 1
+                
+                if new_orders_placed > 0:
+                    self.grid_levels = new_levels
+                    msg = f"🔄 *Grid Widened (Mean-Reversion)*: Added {new_orders_placed} orders, bands now {widened_band*100:.2f}%"
+                    logger.info(msg)
+                    await notify(msg)
 
     async def _check_risk_parameters(self):
         """Global risk checks."""
@@ -703,9 +792,28 @@ class GridStrategy(StrategyEngine):
             await self._handle_fill(order_id)
 
     async def on_ws_ticker(self, ticker: Dict[str, Any]):
-        """Handle real-time price update from WebSocket."""
-        price = Decimal(ticker.get("price", "0"))
+        """Handle real-time price update from WebSocket and update performance equity."""
+        price = Decimal(str(ticker.get("price", "0")))
         if price > 0:
+            self.last_price = price
+            
+            # Periodically snapshot equity for performance metrics (every 60s)
+            now = time.time()
+            if now - self.last_equity_update >= 60:
+                # Estimate total equity: we use PnL as a proxy since we don't have full bankroll here
+                # In a real system, bankroll would be passed in. 
+                # For this bot, we track "PnL Equity" (Initial 0 + cumulative PnL)
+                # To avoid negative equity in Sharpe, we assume a virtual starting balance of $10,000
+                virtual_start = Decimal("10000")
+                stats = await self.get_stats()
+                total_pnl = stats["realized_pnl"] + stats["unrealized_pnl"]
+                current_equity = virtual_start + total_pnl
+                
+                self.equity_history.append(current_equity)
+                # Keep last 10,000 snapshots (~1 week of minute data)
+                if len(self.equity_history) > 10000:
+                    self.equity_history.pop(0)
+                self.last_equity_update = now
             # Update last_price via Kalman filter for smoothing
             self.last_price = Decimal(str(self.kalman.update(float(price))))
             

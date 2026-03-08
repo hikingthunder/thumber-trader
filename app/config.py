@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     liquidity_depth_check_enabled: bool = True
     liquidity_depth_levels: int = 50
     liquidity_max_book_share_pct: Decimal = Decimal("0.20")
+    
+    # New Guardrails
+    daily_stop_loss_usd: Decimal = Decimal("100.0")
+    global_take_profit_usd: Decimal = Decimal("500.0")
+    max_position_size_usd: Decimal = Decimal("2000.0")
 
     # Trend Signal Controls
     trend_candle_granularity: str = "ONE_HOUR"
@@ -180,6 +185,11 @@ class Settings(BaseSettings):
     cross_asset_inventory_min_pct: Decimal = Decimal("0.20")
     cross_asset_candle_lookback: int = 48
     cross_asset_refresh_seconds: int = 300
+    
+    # Dynamic Rebalancing
+    dynamic_rebalancing_enabled: bool = False
+    rebalance_mode: str = "trend-follow" # trend-follow or mean-reversion
+    rebalance_threshold_pct: Decimal = Decimal("0.05")
 
     # Strategy Stack
     strategy_stack_enabled: bool = False
@@ -229,6 +239,17 @@ class Settings(BaseSettings):
     telegram_chat_id: Optional[SecretStr] = None
     telegram_whitelist_chat_id: str = ""
     discord_webhook_url: Optional[SecretStr] = None
+    slack_webhook_url: Optional[SecretStr] = None
+    pagerduty_routing_key: Optional[SecretStr] = None
+
+    # Granular Alert Toggles
+    notify_on_trade: bool = True
+    notify_on_grid_breach: bool = True
+    notify_on_error: bool = True
+    notify_on_daily_summary: bool = True
+
+    # TradingView Webhook Inbound
+    tradingview_webhook_secret: Optional[SecretStr] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

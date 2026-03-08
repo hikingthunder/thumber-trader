@@ -2,11 +2,18 @@
 
 {% block content %}
 <header>
-    <h1>Configuration</h1>
+    <h1>⚙️ Configuration</h1>
     <nav>
-        <a href="/">Dashboard</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/config" class="active">Configuration</a>
+        <a href="/backtest">Backtest</a>
         <a href="/export">Export</a>
-        <a href="/config" style="color: var(--accent-color);">Configuration</a>
+        <a href="/auth/audit-log">Audit Log</a>
+        <div class="nav-divider"></div>
+        {% if user %}
+        <span class="user-badge">👤 {{ user.username }}</span>
+        {% endif %}
+        <a href="/auth/logout" class="btn btn-sm btn-outline">Logout</a>
     </nav>
 </header>
 
@@ -342,68 +349,83 @@
                 </div>
             </div>
 
-            <!-- High Availability & Consensus -->
+            <!-- Guardrails -->
             <div class="config-section">
-                <h2>🌐 Multi-Venue & HA</h2>
-                <div class="checkbox-group">
-                    <input type="checkbox" id="consensus_enabled" name="consensus_pricing_enabled" {{ 'checked' if
-                        settings.consensus_pricing_enabled }}>
-                    <label for="consensus_enabled" style="margin: 0;">Enable Consensus Pricing</label>
-                </div>
-                <div class="form-group">
-                    <label>Consensus Exchanges</label>
-                    <input type="text" name="consensus_exchanges" value="{{ settings.consensus_exchanges }}">
-                    <div class="help-text">comma-separated: coinbase,binance,kraken,bybit</div>
-                </div>
-                <div class="checkbox-group" style="margin-top: 20px;">
-                    <input type="checkbox" id="ha_enabled" name="ha_failover_enabled" {{ 'checked' if
-                        settings.ha_failover_enabled }}>
-                    <label for="ha_enabled" style="margin: 0;">Enable HA Failover</label>
-                </div>
+                <h2>🛡️ Operational Guardrails</h2>
                 <div class="config-grid">
                     <div class="form-group">
-                        <label>Instance ID</label>
-                        <input type="text" name="ha_instance_id" value="{{ settings.ha_instance_id }}">
+                        <label>Daily Stop-Loss (USD)</label>
+                        <input type="number" step="1" name="daily_stop_loss_usd"
+                            value="{{ settings.daily_stop_loss_usd }}">
+                        <div class="help-text">Max loss allowed in a 24h window before auto-kill.</div>
                     </div>
                     <div class="form-group">
-                        <label>Lock Lease (Seconds)</label>
-                        <input type="number" name="ha_lock_lease_seconds" value="{{ settings.ha_lock_lease_seconds }}">
+                        <label>Global Take-Profit (USD)</label>
+                        <input type="number" step="1" name="global_take_profit_usd"
+                            value="{{ settings.global_take_profit_usd }}">
+                        <div class="help-text">Total profit target before pausing strategy.</div>
+                    </div>
+                    <div class="form-group">
+                        <label>Max Order Size (USD)</label>
+                        <input type="number" step="1" name="max_position_size_usd"
+                            value="{{ settings.max_position_size_usd }}">
+                        <div class="help-text">Hard limit on any single order notional.</div>
                     </div>
                 </div>
             </div>
 
-            <!-- Advanced Volatility -->
+            <!-- Dynamic Rebalancing -->
             <div class="config-section">
-                <h2>⚡ ATR Adaptive Grid</h2>
+                <h2>🔄 Dynamic Rebalancing</h2>
                 <div class="checkbox-group">
-                    <input type="checkbox" id="atr_enabled" name="atr_enabled" {{ 'checked' if settings.atr_enabled }}>
-                    <label for="atr_enabled" style="margin: 0;">Enable ATR Adaptive Bands</label>
+                    <input type="checkbox" id="rebal_enabled" name="dynamic_rebalancing_enabled" {{ 'checked' if
+                        settings.dynamic_rebalancing_enabled }}>
+                    <label for="rebal_enabled" style="margin: 0;">Enable Dynamic Grid Shifting</label>
                 </div>
                 <div class="config-grid">
                     <div class="form-group">
-                        <label>ATR Period</label>
-                        <input type="number" name="atr_period" value="{{ settings.atr_period }}">
+                        <label>Rebalance Mode</label>
+                        <select name="rebalance_mode">
+                            <option value="trend-follow" {{ 'selected' if settings.rebalance_mode=='trend-follow' }}>
+                                Trend-Follow (Shift with price)</option>
+                            <option value="mean-reversion" {{ 'selected' if settings.rebalance_mode=='mean-reversion'
+                                }}>Mean-Reversion (Widen/Narrow)</option>
+                        </select>
                     </div>
                     <div class="form-group">
-                        <label>ATR Band Multiplier</label>
-                        <input type="number" step="0.1" name="atr_band_multiplier"
-                            value="{{ settings.atr_band_multiplier }}">
+                        <label>Shift Threshold %</label>
+                        <input type="number" step="0.001" name="rebalance_threshold_pct"
+                            value="{{ settings.rebalance_threshold_pct }}">
                     </div>
                 </div>
             </div>
 
             <!-- Strategy Stack -->
             <div class="config-section">
-                <h2>📚 Strategy Stack</h2>
+                <h2>📚 Strategy Stack (Alpha Layers)</h2>
+                <p class="section-intro">Configure which filters and logic layers are active in the execution pipeline.
+                </p>
                 <div class="checkbox-group">
                     <input type="checkbox" id="stack_enabled" name="strategy_stack_enabled" {{ 'checked' if
                         settings.strategy_stack_enabled }}>
                     <label for="stack_enabled" style="margin: 0;">Enable Multi-Layer Strategy Stack</label>
                 </div>
                 <div class="form-group">
-                    <label>Stack Layers</label>
+                    <label>Active Layers (Priority Order)</label>
                     <input type="text" name="strategy_stack_layers" value="{{ settings.strategy_stack_layers }}">
-                    <div class="help-text">e.g. core,alpha,hedge</div>
+                    <div class="help-text">comma-separated: core, rsi, macd, bb, vpin, volume_profile</div>
+                </div>
+                <div class="config-grid"
+                    style="margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 20px;">
+                    <div style="font-size: 0.8rem; color: var(--text-muted);">
+                        <strong>CORE</strong>: Standard grid logic (Required)
+                    </div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted);">
+                        <strong>RSI/MACD</strong>: Prevents buying/selling at peaks
+                    </div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted);">
+                        <strong>VPIN</strong>: Toxicity avoidance
+                    </div>
                 </div>
             </div>
 
@@ -423,20 +445,59 @@
                         settings.notifications_enabled }}>
                     <label for="notify_enabled" style="margin: 0;">Enable Global Notifications</label>
                 </div>
-                <div class="form-group">
-                    <label>Telegram Bot Token</label>
-                    <input type="password" name="telegram_bot_token"
-                        value="{{ '********' if settings.telegram_bot_token else '' }}">
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>Telegram Bot Token</label>
+                        <input type="password" name="telegram_bot_token"
+                            value="{{ '********' if settings.telegram_bot_token else '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Telegram Chat ID</label>
+                        <input type="password" name="telegram_chat_id"
+                            value="{{ '********' if settings.telegram_chat_id else '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Discord Webhook URL</label>
+                        <input type="password" name="discord_webhook_url"
+                            value="{{ '********' if settings.discord_webhook_url else '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Slack Webhook URL</label>
+                        <input type="password" name="slack_webhook_url"
+                            value="{{ '********' if settings.slack_webhook_url else '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label>PagerDuty Routing Key</label>
+                        <input type="password" name="pagerduty_routing_key"
+                            value="{{ '********' if settings.pagerduty_routing_key else '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label>TradingView Webhook Secret</label>
+                        <input type="password" name="tradingview_webhook_secret"
+                            value="{{ '********' if settings.tradingview_webhook_secret else '' }}">
+                        <div class="help-text">Shared secret for inbound TradingView alerts at /api/webhooks/tradingview</div>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label>Telegram Chat ID</label>
-                    <input type="password" name="telegram_chat_id"
-                        value="{{ '********' if settings.telegram_chat_id else '' }}">
-                </div>
-                <div class="form-group">
-                    <label>Discord Webhook URL</label>
-                    <input type="password" name="discord_webhook_url"
-                        value="{{ '********' if settings.discord_webhook_url else '' }}">
+
+                <!-- Granular Alert Toggles -->
+                <h3 style="margin-top: 20px; color: var(--text-muted); font-size: 0.9rem;">📋 Alert Triggers</h3>
+                <div class="config-grid" style="margin-top: 8px;">
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="notify_trade" name="notify_on_trade" {{ 'checked' if settings.notify_on_trade }}>
+                        <label for="notify_trade" style="margin: 0;">Trade Executed</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="notify_grid" name="notify_on_grid_breach" {{ 'checked' if settings.notify_on_grid_breach }}>
+                        <label for="notify_grid" style="margin: 0;">Grid Range Breached</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="notify_error" name="notify_on_error" {{ 'checked' if settings.notify_on_error }}>
+                        <label for="notify_error" style="margin: 0;">API Error / Connection Lost</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="notify_daily" name="notify_on_daily_summary" {{ 'checked' if settings.notify_on_daily_summary }}>
+                        <label for="notify_daily" style="margin: 0;">Daily PnL Summary</label>
+                    </div>
                 </div>
             </div>
 

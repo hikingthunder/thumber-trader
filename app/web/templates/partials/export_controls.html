@@ -29,14 +29,49 @@
             </div>
         </div>
 
-        <!-- Specialized Exports -->
+        <!-- Accounting Exports -->
         <div class="export-group">
             <h3>Accounting (QB/Quicken)</h3>
             <div class="btn-group">
-                <a href="/export/accounting_fills/csv" class="btn btn-primary">Fills (CSV)</a>
-                <a href="/export/accounting_tax/csv" class="btn btn-primary">Tax Lots (CSV)</a>
+                <a href="/export/accounting_fills/csv" class="btn btn-primary">Fills CSV</a>
+                <a href="/export/accounting_tax/csv" class="btn btn-primary">Tax Lots CSV</a>
             </div>
         </div>
+
+        <!-- Financial Software -->
+        <div class="export-group">
+            <h3>📥 Quicken (QFX)</h3>
+            <div class="btn-group">
+                <a href="/export/fills/qfx" class="btn btn-accent">Fills .QFX</a>
+                <a href="/export/tax_matches/qfx" class="btn btn-accent">Tax .QFX</a>
+            </div>
+        </div>
+
+        <div class="export-group">
+            <h3>📥 QuickBooks (QBO)</h3>
+            <div class="btn-group">
+                <a href="/export/fills/qbo" class="btn btn-accent">Fills .QBO</a>
+                <a href="/export/tax_matches/qbo" class="btn btn-accent">Tax .QBO</a>
+            </div>
+        </div>
+
+        <div class="export-group">
+            <h3>📥 TurboTax (8949)</h3>
+            <div class="btn-group">
+                <a href="/export/tax_matches/turbotax" class="btn btn-accent">Form 8949 CSV</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Fee Summary Panel -->
+<div class="card mt-4"
+     hx-get="/api/fee-summary"
+     hx-trigger="load"
+     hx-target="#fee-summary-content">
+    <h2>💰 Fee Summary</h2>
+    <div id="fee-summary-content">
+        <p style="color: #94a3b8;">Loading fee breakdown...</p>
     </div>
 </div>
 
@@ -50,6 +85,7 @@
     .btn-group {
         display: flex;
         gap: 0.5rem;
+        flex-wrap: wrap;
     }
 
     .btn-secondary {
@@ -59,5 +95,49 @@
 
     .btn-secondary:hover {
         background-color: #475569;
+    }
+
+    .btn-accent {
+        background: linear-gradient(135deg, #0ea5e9, #6366f1);
+        color: white;
+        border: none;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        text-decoration: none;
+        display: inline-block;
+        cursor: pointer;
+        transition: opacity 0.2s;
+    }
+
+    .btn-accent:hover {
+        opacity: 0.85;
+    }
+
+    .fee-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+    }
+
+    .fee-stat {
+        text-align: center;
+        padding: 12px;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+    }
+
+    .fee-stat .value {
+        font-size: 1.1rem;
+        font-weight: 700;
+        display: block;
+    }
+
+    .fee-stat .label {
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        margin-top: 4px;
     }
 </style>

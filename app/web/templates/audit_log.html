@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    .audit-container {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+
+    .audit-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 24px;
+    }
+
+    .audit-count {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        background: rgba(30, 41, 59, 0.5);
+        padding: 6px 14px;
+        border-radius: 8px;
+    }
+
+    .audit-table {
+        overflow-x: auto;
+    }
+
+    .action-badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+
+    .action-login {
+        background: rgba(16, 185, 129, 0.15);
+        color: #34d399;
+    }
+
+    .action-config {
+        background: rgba(245, 158, 11, 0.15);
+        color: #fbbf24;
+    }
+
+    .action-error {
+        background: rgba(239, 68, 68, 0.15);
+        color: #f87171;
+    }
+
+    .action-default {
+        background: rgba(56, 189, 248, 0.15);
+        color: #38bdf8;
+    }
+</style>
+
+<header>
+    <h1>📋 Audit Log</h1>
+    <nav>
+        <a href="/">Dashboard</a>
+        <a href="/config">Configuration</a>
+        <a href="/auth/audit-log" style="color: var(--accent-color);">Audit Log</a>
+        <a href="/auth/logout">Logout</a>
+    </nav>
+</header>
+
+<div class="audit-container">
+    <div class="audit-header">
+        <h2>Recent Activity</h2>
+        <div class="audit-count">{{ logs | length }} entries (last 200)</div>
+    </div>
+
+    <div class="card audit-table">
+        <table>
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Action</th>
+                    <th>Detail</th>
+                    <th>IP Address</th>
+                    <th>User Agent</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in logs %}
+                <tr>
+                    <td style="white-space: nowrap; font-size: 0.8rem;">
+                        <script>document.write(new Date({{ log.timestamp }} * 1000).toLocaleString())</script>
+                    </td>
+                    <td>
+                        {% if 'login' in log.action %}
+                        <span class="action-badge action-login">{{ log.action }}</span>
+                        {% elif 'config' in log.action or 'POST' in log.action %}
+                        <span class="action-badge action-config">{{ log.action }}</span>
+                        {% elif 'failed' in log.action or 'error' in log.action %}
+                        <span class="action-badge action-error">{{ log.action }}</span>
+                        {% else %}
+                        <span class="action-badge action-default">{{ log.action }}</span>
+                        {% endif %}
+                    </td>
+                    <td
+                        style="font-size: 0.85rem; color: var(--text-muted); max-width: 300px; overflow: hidden; text-overflow: ellipsis;">
+                        {{ log.detail or "—" }}
+                    </td>
+                    <td style="font-family: monospace; font-size: 0.8rem;">{{ log.ip_address or "—" }}</td>
+                    <td
+                        style="font-size: 0.75rem; color: var(--text-muted); max-width: 200px; overflow: hidden; text-overflow: ellipsis;">
+                        {{ (log.user_agent or "—")[:60] }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

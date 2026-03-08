@@ -24,7 +24,8 @@ class WSUserClient:
         self.subscriptions: Set[str] = set()
         self.handlers: Dict[str, List[Callable]] = {
             "fills": [],
-            "ticker": []
+            "ticker": [],
+            "l2": []
         }
         self.running = False
         self.retry_count = 0
@@ -55,6 +56,7 @@ class WSUserClient:
                     product_ids = settings.product_ids.split(",")
                     await self._send_subscription(product_ids, "user")
                     await self._send_subscription(product_ids, "ticker")
+                    await self._send_subscription(product_ids, "level2")
                     
                     async for message in ws:
                         await self._handle_message(message)
@@ -122,3 +124,8 @@ class WSUserClient:
                 for ticker in tickers:
                     for handler in self.handlers["ticker"]:
                         await handler(ticker)
+        
+        elif channel == "level2":
+            # Pass full L2 event to handlers
+            for handler in self.handlers["l2"]:
+                await handler(data)

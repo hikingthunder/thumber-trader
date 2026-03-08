@@ -28,5 +28,8 @@ async def get_db():
         yield session
 
 async def init_db():
+    # Import all models so Base.metadata knows about them
+    import app.database.models  # noqa: F401
+    import app.auth.models  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

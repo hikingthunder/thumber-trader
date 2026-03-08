@@ -9,6 +9,8 @@ from app.core.exchange import CoinbaseExchange
 from app.core.strategy import GridStrategy
 from app.core.state import SharedRiskState
 from app.core.websocket_client import WSUserClient
+from app.utils.notifications import notify
+
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ class StrategyManager:
             # Setup WebSocket Handlers
             self.ws_client.add_handler("fills", self._handle_ws_fill)
             self.ws_client.add_handler("ticker", self._handle_ws_ticker)
+            self.ws_client.add_handler("l2", self._handle_ws_l2)
 
             # Basic connectivity check
             accounts = await self.exchange.get_account_balances()
@@ -161,19 +164,87 @@ class StrategyManager:
         }
 
 
-    async def _handle_ws_fill(self, event: Dict[str, Any]):
-        """Route WS fill event to strategy."""
-        product_id = event.get("product_id")
-        if product_id in self.strategies:
-            await self.strategies[product_id].on_ws_fill(event)
-
     async def _handle_ws_ticker(self, ticker: Dict[str, Any]):
-        """Route WS ticker event to strategy."""
+        """Route WS ticker event to strategy and broadcast to browser."""
         product_id = ticker.get("product_id")
         if product_id in self.strategies:
             await self.strategies[product_id].on_ws_ticker(ticker)
+        
+        # Broadcast to dashboard
+        from app.web.ws_router import browser_ws_manager
+        await browser_ws_manager.broadcast({
+            "type": "ticker",
+            "product_id": product_id,
+            "price": float(ticker.get("price", 0)),
+            "time": ticker.get("time")
+        })
+
+    async def _handle_ws_fill(self, event: Dict[str, Any]):
+        """Route WS fill event to strategy and broadcast to browser."""
+        product_id = event.get("product_id")
+        if product_id in self.strategies:
+            await self.strategies[product_id].on_ws_fill(event)
+            
+        # Broadcast to dashboard
+        from app.web.ws_router import browser_ws_manager
+        await browser_ws_manager.broadcast({
+            "type": "fill",
+            "product_id": product_id,
+            "side": event.get("side"),
+            "price": float(event.get("price", 0)),
+            "size": float(event.get("size", 0)),
+            "time": event.get("created_at")
+        })
+
+    async def _handle_ws_l2(self, event: Dict[str, Any]):
+        """Handle L2 book updates and broadcast density to dashboard."""
+        product_id = event.get("product_id")
+        # For simplicity, we only broadcast a snapshot of density if it's an update
+        # L2 messages come fast, so we throttle broadcast to 1 per second
+        now = time.time()
+        if not hasattr(self, "_last_l2_broadcast"):
+            self._last_l2_broadcast = 0
+            
+        if now - self._last_l2_broadcast < 1.0:
+            return
+            
+        self._last_l2_broadcast = now
+        
+        # Calculate density using metrics helper
+        from app.core import metrics as quant_metrics
+        from app.core import analysis
+        
+        strategy = self.strategies.get(product_id)
+        if not strategy or strategy.last_price == 0:
+            return
+            
+        # Extract snapshots (simplified)
+        # Note: In a production system, we'd maintain the full book.
+        # Here we just take the first few levels from the current event.
+        ev_data = event.get("events", [{}])[0]
+        updates = ev_data.get("updates", [])
+        
+        bids = [[u["price_level"], u["new_quantity"]] for u in updates if u["side"] == "bid"]
+        asks = [[u["price_level"], u["new_quantity"]] for u in updates if u["side"] == "offer"]
+        
+        if not bids and not asks:
+            return
+            
+        density = quant_metrics.get_order_book_density(bids, asks, strategy.last_price)
+        
+        # Also include VPIN
+        vpin_val = analysis.vpin(strategy.candles)
+        
+        from app.web.ws_router import browser_ws_manager
+        await browser_ws_manager.broadcast({
+            "type": "depth",
+            "product_id": product_id,
+            "density": density,
+            "vpin": float(vpin_val)
+        })
 
     async def _monitor_loop(self):
+
         """Monitor API health and manage circuit breaker."""
         while self.running:
             try:
@@ -201,7 +272,24 @@ class StrategyManager:
                                 for s in self.strategies.values():
                                     s.paused = False
 
+                # 2. Broadcast Health to dashboard
+                from app.web.ws_router import browser_ws_manager
+                import psutil
+                import time
+                
+                # Basic health stats
+                health_data = {
+                    "type": "health",
+                    "cpu_percent": psutil.cpu_percent(),
+                    "ram_percent": psutil.virtual_memory().percent,
+                    "bot_running": self.running,
+                    "circuit_open": self.circuit_open,
+                    "time": time.time()
+                }
+                await browser_ws_manager.broadcast(health_data)
+
                 await asyncio.sleep(settings.api_health_window_seconds / 10)
+
             except Exception as e:
                 logger.error(f"Error in monitor loop: {e}")
                 await asyncio.sleep(10)

@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+
+{% block content %}
+<header>
+    <h1>🧪 Strategy Backtesting</h1>
+    <nav>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/config">Configuration</a>
+        <a href="/backtest" class="active">Backtest</a>
+        <a href="/export">Export</a>
+        <a href="/auth/audit-log">Audit Log</a>
+        <div class="nav-divider"></div>
+        {% if user %}
+        <span class="user-badge">👤 {{ user.username }}</span>
+        {% endif %}
+        <a href="/auth/logout" class="btn btn-sm btn-outline">Logout</a>
+    </nav>
+</header>
+
+<main>
+    <style>
+        .backtest-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .backtest-form {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 30px;
+            align-items: start;
+        }
+
+        .params-panel {
+            background: rgba(30, 41, 59, 0.4);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            position: sticky;
+            top: 20px;
+        }
+
+        .results-panel {
+            background: rgba(15, 23, 42, 0.5);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            min-height: 600px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            background: #020617;
+            border: 1px solid var(--border-color);
+            color: white;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .results-empty {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            text-align: center;
+        }
+
+        .results-empty i {
+            font-size: 3rem;
+            margin-bottom: 15px;
+            opacity: 0.3;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .stat-card .value {
+            font-size: 1.25rem;
+            font-weight: 700;
+            display: block;
+        }
+
+        .stat-card .label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        #backtest-chart {
+            width: 100%;
+            height: 400px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .loading-overlay {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(4px);
+            z-index: 10;
+            align-items: center;
+            justify-content: center;
+            border-radius: 16px;
+        }
+
+        .htmx-request .loading-overlay {
+            display: flex;
+        }
+    </style>
+
+    <div class="backtest-container">
+        <div class="backtest-form">
+            <!-- Sidebar: Parameters -->
+            <aside class="params-panel">
+                <h2 style="margin-top: 0; font-size: 1.1rem; display: flex; align-items: center; gap: 8px;">
+                    <span>⚙️ Parameters</span>
+                </h2>
+                <form hx-post="/api/backtest/run" hx-target="#backtest-results" hx-indicator=".results-panel">
+                    <div class="form-group">
+                        <label>Product</label>
+                        <input type="text" name="product_id" value="{{ settings.product_id }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Start Date</label>
+                        <input type="date" name="start_date" required>
+                    </div>
+                    <div class="form-group">
+                        <label>End Date</label>
+                        <input type="date" name="end_date" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Initial USD</label>
+                        <input type="number" name="initial_usd" value="1000">
+                    </div>
+                    <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 20px 0;">
+                    <div class="form-group">
+                        <label>Grid Lines</label>
+                        <input type="number" name="grid_lines" value="{{ settings.grid_lines }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Grid Band %</label>
+                        <input type="number" step="0.001" name="grid_band_pct" value="{{ settings.grid_band_pct }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Order Size (USD)</label>
+                        <input type="number" name="order_size" value="{{ settings.base_order_notional_usd }}">
+                    </div>
+
+                    <button type="submit" class="btn btn-success" style="width: 100%; margin-top: 20px; height: 45px;">
+                        ▶ RUN BACKTEST
+                    </button>
+                </form>
+            </aside>
+
+            <!-- Main: Results -->
+            <section class="results-panel" id="backtest-results">
+                <div class="loading-overlay">
+                    <div style="text-align: center;">
+                        <div class="spinner" style="margin-bottom: 10px;"></div>
+                        <p>Simulating market cycles...</p>
+                    </div>
+                </div>
+
+                <div class="results-empty">
+                    <div style="font-size: 4rem; margin-bottom: 20px;">📈</div>
+                    <h3>No Backtest Results Yet</h3>
+                    <p>Select your parameters and click "Run Backtest" to see historical performance.</p>
+                </div>
+            </section>
+        </div>
+    </div>
+</main>
+{% endblock %}

@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    .totp-container {
+        max-width: 520px;
+        margin: 40px auto 0;
+        padding: 0 20px;
+    }
+
+    .totp-card {
+        background: rgba(15, 23, 42, 0.8);
+        border: 1px solid var(--border-color);
+        border-radius: 20px;
+        padding: 40px;
+        backdrop-filter: blur(16px);
+        text-align: center;
+    }
+
+    .totp-card h2 {
+        color: var(--accent-color);
+        margin-bottom: 12px;
+    }
+
+    .totp-card p {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+        margin-bottom: 24px;
+    }
+
+    .qr-wrapper {
+        display: inline-block;
+        padding: 16px;
+        background: #0f172a;
+        border-radius: 16px;
+        border: 2px solid var(--border-color);
+        margin-bottom: 20px;
+    }
+
+    .qr-wrapper img {
+        display: block;
+        border-radius: 8px;
+    }
+
+    .secret-key {
+        background: var(--bg-color);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 12px;
+        font-family: monospace;
+        font-size: 0.95rem;
+        color: var(--accent-color);
+        letter-spacing: 0.1em;
+        word-break: break-all;
+        margin-bottom: 24px;
+    }
+
+    .secret-label {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        margin-bottom: 6px;
+    }
+
+    .totp-error {
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        border-radius: 10px;
+        padding: 12px;
+        margin-bottom: 20px;
+        color: #f87171;
+        font-size: 0.9rem;
+    }
+</style>
+
+<header>
+    <h1>Two-Factor Authentication Setup</h1>
+    <nav>
+        <a href="/">Dashboard</a>
+        <a href="/auth/logout">Logout</a>
+    </nav>
+</header>
+
+<div class="totp-container">
+    <div class="totp-card">
+        <h2>🔐 Scan with Authenticator App</h2>
+        <p>Use Google Authenticator, Authy, or any TOTP-compatible app to scan this QR code.</p>
+
+        {% if error %}
+        <div class="totp-error">⚠️ {{ error }}</div>
+        {% endif %}
+
+        <div class="qr-wrapper">
+            <img src="data:image/png;base64,{{ qr_code }}" alt="TOTP QR Code" width="200" height="200">
+        </div>
+
+        <div class="secret-label">Or enter this key manually:</div>
+        <div class="secret-key">{{ secret }}</div>
+
+        <form method="post" action="/auth/totp-verify" style="margin-top: 20px;">
+            <input type="hidden" name="secret" value="{{ secret }}">
+            <div style="margin-bottom: 16px;">
+                <input type="text" name="code" placeholder="Enter 6-digit code" required autofocus maxlength="6"
+                    pattern="[0-9]{6}" inputmode="numeric" style="width: 200px; text-align: center; font-size: 1.5rem; letter-spacing: 0.3em; font-weight: 700;
+                              padding: 14px; background: var(--bg-color); border: 1px solid var(--border-color);
+                              color: white; border-radius: 10px;">
+            </div>
+            <button type="submit" class="btn" style="padding: 12px 32px; font-size: 1rem;">
+                ✅ Verify & Enable 2FA
+            </button>
+        </form>
+    </div>
+</div>
+{% endblock %}

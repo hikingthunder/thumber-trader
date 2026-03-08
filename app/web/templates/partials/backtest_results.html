@@ -1,0 +1,112 @@
+<div class="stats-grid">
+    <div class="stat-card">
+        <span class="value" style="color: var(--accent-color);">${{ "{:,.2f}".format(report.initial_balance) }}</span>
+        <span class="label">Initial</span>
+    </div>
+    <div class="stat-card">
+        <span class="value"
+            style="color: {{ 'var(--success-color)' if report.total_pnl >= 0 else 'var(--danger-color)' }}">
+            ${{ "{:,.2f}".format(report.final_equity) }}
+        </span>
+        <span class="label">Final Equity</span>
+    </div>
+    <div class="stat-card">
+        <span class="value"
+            style="color: {{ 'var(--success-color)' if report.total_pnl >= 0 else 'var(--danger-color)' }}">
+            {{ '+' if report.total_pnl > 0 }}${{ "{:,.2f}".format(report.total_pnl) }}
+        </span>
+        <span class="label">Total PnL</span>
+    </div>
+    <div class="stat-card">
+        <span class="value" style="color: var(--danger-color);">${{ "{:,.2f}".format(report.max_drawdown) }}</span>
+        <span class="label">Max Drawdown</span>
+    </div>
+    <div class="stat-card">
+        <span class="value">{{ report.trade_count }}</span>
+        <span class="label">Trades</span>
+    </div>
+</div>
+
+<div class="card">
+    <h3 style="margin-top: 0; font-size: 0.9rem;">📈 Equity Curve</h3>
+    <div id="equity-chart" style="height: 300px; width: 100%;"></div>
+</div>
+
+<div class="card">
+    <h3 style="margin-top: 0; font-size: 0.9rem;">📜 Last 20 Trades</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Type</th>
+                <th>Price</th>
+                <th>Size</th>
+                <th>Fee</th>
+                <th>Equity</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for trade in trades %}
+            <tr>
+                <td>
+                    <span class="status-badge {{ 'status-active' if trade.side == 'BUY' else 'status-inactive' }}">
+                        {{ trade.side }}
+                    </span>
+                </td>
+                <td class="font-mono">${{ "{:,.2f}".format(trade.price) }}</td>
+                <td class="font-mono">{{ "{:,.4f}".format(trade.size) }}</td>
+                <td class="font-mono" style="color: var(--text-muted);">${{ "{:,.4f}".format(trade.fee) }}</td>
+                <td class="font-mono">${{ "{:,.2f}".format(trade.balance) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+    (function () {
+        const container = document.getElementById('equity-chart');
+        const chart = LightweightCharts.createChart(container, {
+            layout: {
+                background: { color: 'transparent' },
+                textColor: '#94a3b8',
+            },
+            grid: {
+                vertLines: { color: '#1e293b' },
+                horzLines: { color: '#1e293b' },
+            },
+            rightPriceScale: {
+                borderColor: '#1e293b',
+            },
+            timeScale: {
+                borderColor: '#1e293b',
+            },
+        });
+
+        const lineSeries = chart.addLineSeries({
+            color: '#38bdf8',
+            lineWidth: 2,
+            areaTopColor: 'rgba(56, 189, 248, 0.2)',
+            areaBottomColor: 'rgba(56, 189, 248, 0)',
+        });
+
+        // Convert the simple array to chart format
+        // We'll use dummy indices for time if we don't have timestamps
+        const pnlData = {{ pnl_history | tojson
+    }};
+    const data = pnlData.map((val, idx) => ({
+        time: idx,
+        value: val + {{ report.initial_balance }}
+        }));
+
+    lineSeries.setData(data);
+    chart.timeScale().fitContent();
+
+    // Handle resize
+    new ResizeObserver(entries => {
+        if (entries.length === 0 || entries[0].target !== container) return;
+        const newRect = entries[0].contentRect;
+        chart.applyOptions({ height: newRect.height, width: newRect.width });
+    }).observe(container);
+    }) ();
+</script>

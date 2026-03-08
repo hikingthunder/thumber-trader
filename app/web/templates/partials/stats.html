@@ -1,41 +1,89 @@
-<div>
-    <div style="margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center;">
-        <div>
-            <strong>Status:</strong>
-            <span class="status-badge {{ 'status-active' if running else 'status-inactive' }}">
-                {{ 'RUNNING' if running else 'STOPPED' }}
-            </span>
-        </div>
-        <div style="text-align: right;">
-            <div style="font-size: 1.5rem; font-weight: bold;">{{ last_price }} <span
-                    style="font-size: 0.8rem; color: #94a3b8;">USD</span></div>
-        </div>
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+    <!-- Primary PnL -->
+    <div class="stat-item"
+        style="grid-column: span 2; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; margin-bottom: 5px;">
+        <span class="stat-label">Total Realized PnL</span>
+        <span class="stat-value"
+            style="font-size: 1.4rem; color: {% if total_realized_pnl >= 0 %}var(--success-color){% else %}var(--danger-color){% endif %};">
+            {% if total_realized_pnl >= 0 %}+{% endif %}${{ "{:,.2f}".format(total_realized_pnl) }}
+        </span>
     </div>
 
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
-        <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px;">
-            <div style="font-size: 0.75rem; color: #94a3b8;">Unrealized PnL</div>
-            <div style="font-size: 1.1rem; color: {{ '#10b981' if unrealized_pnl|float >= 0 else '#ef4444' }};">
-                {{ "+" if unrealized_pnl|float > 0 else "" }}{{ unrealized_pnl }}
-            </div>
-        </div>
-        <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px;">
-            <div style="font-size: 0.75rem; color: #94a3b8;">Realized PnL (Session)</div>
-            <div style="font-size: 1.1rem; color: {{ '#10b981' if realized_pnl|float >= 0 else '#ef4444' }};">
-                {{ "+" if realized_pnl|float > 0 else "" }}{{ realized_pnl }}
-            </div>
-        </div>
+    <div class="stat-item">
+        <span class="stat-label">Unrealized PnL</span>
+        <span class="stat-value"
+            style="color: {% if total_unrealized_pnl >= 0 %}var(--success-color){% else %}var(--danger-color){% endif %};">
+            {% if total_unrealized_pnl >= 0 %}+{% endif %}${{ "{:,.2f}".format(total_unrealized_pnl) }}
+        </span>
     </div>
 
-    <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 4px; margin-bottom: 10px;">
-        <div style="font-size: 0.75rem; color: #94a3b8; margin-bottom: 4px;">Wallet Balance</div>
-        <div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
-            <span>{{ quote_bal }} {{ quote_currency }}</span>
-            <span>{{ base_bal }} {{ base_currency }}</span>
-        </div>
+    <div class="stat-item">
+        <span class="stat-label">Active Orders</span>
+        <span class="stat-value font-mono">{{ stats.orders_count }}</span>
     </div>
 
-    <div style="font-size: 0.8rem; color: #94a3b8; text-align: right;">
-        Active Orders: <span style="color: white;">{{ orders_count }}</span>
+    <!-- Advanced Quant Metrics -->
+    <div class="stat-item">
+        <span class="stat-label">Max Drawdown</span>
+        <span class="stat-value" style="color: var(--danger-color);">{{ "{:.2f}%".format(stats.max_drawdown_pct)
+            }}</span>
+    </div>
+
+    <div class="stat-item">
+        <span class="stat-label">Sharpe Ratio</span>
+        <span class="stat-value" style="color: var(--accent-color);">{{ "{:.2f}".format(stats.sharpe_ratio) }}</span>
+    </div>
+
+    <div class="stat-item">
+        <span class="stat-label">Inventory ({{ product_id.split('-')[0] if product_id else '' }})</span>
+        <span class="stat-value font-mono">{{ "{:.4f}".format(stats.inventory_base) }}</span>
+    </div>
+
+    <div class="stat-item">
+        <span class="stat-label">Recovery Est.</span>
+        <span class="stat-value">{{ "{:.1f} hrs".format(stats.recovery_time_hours) }}</span>
     </div>
 </div>
+
+<div style="margin-top: 15px; display: flex; align-items: center; gap: 8px;">
+    <div class="status-indicator {% if running %}status-active{% else %}status-inactive{% endif %}"></div>
+    <span style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">
+        Bot {{ "Active" if running else "Paused" }}
+    </span>
+</div>
+
+<style>
+    .stat-item {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .stat-label {
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        font-weight: 600;
+    }
+
+    .stat-value {
+        font-size: 1.1rem;
+        font-weight: 700;
+    }
+
+    .status-indicator {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+    }
+
+    .status-active {
+        background-color: var(--success-color);
+        box-shadow: 0 0 8px var(--success-color);
+    }
+
+    .status-inactive {
+        background-color: var(--danger-color);
+    }
+</style>

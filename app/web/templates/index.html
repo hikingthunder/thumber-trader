@@ -2,92 +2,337 @@
 
 {% block content %}
 <header>
-    <div>
-        <h1>Thumber Trader</h1>
-        <div style="font-size: 0.9rem; color: #94a3b8;">
-            Product: <span style="color: white;">{{ product_id }}</span> |
-            Mode: <span style="color: {{ 'orange' if paper_trading else 'white' }};">
-                {{ 'PAPER TRADING' if paper_trading else 'LIVE' }}
-            </span>
-        </div>
+    <div class="header-left">
+        <h1>⚡ Command Center</h1>
+        {% if paper_trading %}
+        <span class="status-badge status-inactive">PAPER MODE</span>
+        {% endif %}
     </div>
-
     <nav>
-        <a href="/">Dashboard</a>
-        <a href="/export">Export</a>
+        <a href="/dashboard" class="active">Dashboard</a>
         <a href="/config">Configuration</a>
+        <a href="/backtest">Backtest</a>
+        <a href="/export">Export</a>
+        <a href="/auth/audit-log">Audit Log</a>
+        <div class="nav-divider"></div>
+        {% if user and user.totp_enabled %}
+        <span class="user-badge">🔐 {{ user.username }}</span>
+        {% elif user %}
+        <span class="user-badge">👤 {{ user.username }}</span>
+        {% endif %}
+        {% if user and not user.totp_enabled %}
+        <a href="/auth/totp-setup" class="btn btn-sm btn-outline" style="font-size: 0.75rem;">Setup 2FA</a>
+        {% endif %}
+        <a href="/auth/logout" class="btn btn-sm btn-outline">Logout</a>
+        <button class="btn btn-sm btn-kill" onclick="showKillModal()">🚨 KILL</button>
     </nav>
-    <div id="controls">
-        <button class="btn btn-success" hx-post="/dashboard/control/start" hx-target="#stats-widget">Start</button>
-        <button class="btn btn-danger" hx-post="/dashboard/control/stop" hx-target="#stats-widget">Stop</button>
-    </div>
 </header>
 
-<main class="dashboard-grid">
-    <!-- Price Chart Widget -->
-    <div class="card" style="grid-column: span 2;">
-        <h2>Market Chart ({{ product_id }})</h2>
-        <div id="chart-container" style="height: 400px; width: 100%;"></div>
+<!-- TradingView Lightweight Chart -->
+<div class="card" style="grid-column: span 2; min-height: 300px; margin-bottom: 20px;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h2 style="margin: 0;">{{ product_id }} Live Chart</h2>
+        <div id="chart-price" class="font-mono"
+            style="font-size: 1.3rem; font-weight: 700; color: var(--accent-color);">—</div>
     </div>
+    <div id="chart" style="width: 100%; height: 280px;"></div>
+</div>
 
+<div class="dashboard-grid">
     <!-- Stats Widget -->
-    <div id="stats-widget" class="card" hx-get="/dashboard/stats" hx-target="this" hx-trigger="load, every 2s">
-        <!-- Initial Content Loading... -->
-        <p>Loading stats...</p>
+    <div class="card">
+        <h2>📊 Overview</h2>
+        <div id="stats-container" hx-get="/dashboard/stats" hx-trigger="load, every 5s" hx-swap="innerHTML">
+            <p style="color: var(--text-muted);">Loading stats...</p>
+        </div>
+        <!-- Bot Controls -->
+        <div
+            style="display: flex; gap: 10px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border-color);">
+            <button class="btn btn-sm btn-success" hx-post="/dashboard/control/start" hx-target="#stats-container"
+                hx-swap="innerHTML">▶ Start</button>
+            <button class="btn btn-sm btn-danger" hx-post="/dashboard/control/stop" hx-target="#stats-container"
+                hx-swap="innerHTML">⏹ Stop</button>
+        </div>
     </div>
 
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-    <script>
-        const chart = LightweightCharts.createChart(document.getElementById('chart-container'), {
+    <!-- System Health Widget -->
+    <div class="card" id="health-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h2 style="margin: 0;">💓 System Health</h2>
+            <div id="ws-status"></div>
+        </div>
+        <div id="health-container" style="display: grid; gap: 10px;">
+            <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--text-muted); font-size: 0.85rem;">CPU Usage</span>
+                <span id="cpu-val" class="font-mono" style="font-size: 0.85rem;">—</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--text-muted); font-size: 0.85rem;">RAM Usage</span>
+                <span id="ram-val" class="font-mono" style="font-size: 0.85rem;">—</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--text-muted); font-size: 0.85rem;">Informed Trading (VPIN)</span>
+                <span id="vpin-val" class="font-mono" style="font-size: 0.85rem; font-weight: 700;">—</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+                <span style="color: var(--text-muted); font-size: 0.85rem;">Bot Engine</span>
+                <span id="bot-status">—</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Depth Heatmap Widget -->
+    <div class="card" style="grid-column: span 1;">
+        <h2>🔥 Market Depth</h2>
+        <div
+            style="position: relative; height: 160px; background: rgba(0,0,0,0.2); border-radius: 4px; overflow: hidden; margin-top: 10px;">
+            <canvas id="depth-canvas" style="width: 100%; height: 100%;"></canvas>
+            <div
+                style="position: absolute; top: 50%; width: 100%; height: 1px; background: var(--accent-color); opacity: 0.5; transform: translateY(-50%);">
+            </div>
+        </div>
+        <div
+            style="display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-muted); margin-top: 5px; font-weight: 600;">
+            <span>LOW VOL</span>
+            <span>HIGH LIQUIDITY</span>
+            <span>LOW VOL</span>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Activity -->
+<div class="dashboard-grid mt-4">
+    <!-- Active Orders -->
+    <div class="card">
+        <h2>📋 Active Orders</h2>
+        <div id="orders-container" hx-get="/dashboard/orders" hx-trigger="load, every 8s" hx-swap="innerHTML">
+            <p style="color: var(--text-muted);">Loading orders...</p>
+        </div>
+    </div>
+
+    <!-- Recent Fills -->
+    <div class="card">
+        <h2>✅ Recent Fills</h2>
+        <div id="fills-container" hx-get="/dashboard/fills" hx-trigger="load, every 8s" hx-swap="innerHTML">
+            <p style="color: var(--text-muted);">Loading fills...</p>
+        </div>
+    </div>
+</div>
+
+<!-- TradingView Lightweight Charts -->
+<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+    // --- Chart Setup ---
+    const chartContainer = document.getElementById('chart');
+    let chart, lineSeries;
+
+    if (chartContainer && typeof LightweightCharts !== 'undefined') {
+        chart = LightweightCharts.createChart(chartContainer, {
+            width: chartContainer.clientWidth,
+            height: 280,
             layout: {
-                backgroundColor: '#1e293b',
-                textColor: '#f1f5f9',
+                background: { type: 'solid', color: 'transparent' },
+                textColor: '#94a3b8',
+                fontFamily: 'Inter, system-ui',
             },
             grid: {
-                vertLines: { color: '#334155' },
-                horzLines: { color: '#334155' },
+                vertLines: { color: 'rgba(30, 41, 59, 0.5)' },
+                horzLines: { color: 'rgba(30, 41, 59, 0.5)' },
             },
-            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-            priceScale: { borderColor: '#334155' },
-            timeScale: { borderColor: '#334155' },
+            rightPriceScale: {
+                borderColor: 'rgba(30, 41, 59, 0.8)',
+            },
+            timeScale: {
+                borderColor: 'rgba(30, 41, 59, 0.8)',
+                timeVisible: true,
+                secondsVisible: true,
+            },
+            crosshair: {
+                mode: 0,
+                vertLine: { color: 'rgba(56, 189, 248, 0.3)', style: 2 },
+                horzLine: { color: 'rgba(56, 189, 248, 0.3)', style: 2 },
+            },
         });
 
-        const lineSeries = chart.addLineSeries({
-            color: '#3b82f6',
+        lineSeries = chart.addLineSeries({
+            color: '#38bdf8',
             lineWidth: 2,
+            priceLineVisible: true,
+            priceLineColor: 'rgba(56, 189, 248, 0.4)',
+            crosshairMarkerVisible: true,
+            crosshairMarkerRadius: 4,
         });
 
-        // Simple poll for price updates
-        setInterval(async () => {
-            try {
-                const response = await fetch('/dashboard/price');
-                const data = await response.json();
-                if (data.price > 0) {
-                    lineSeries.update({
-                        time: data.time,
-                        value: data.price
-                    });
-                }
-            } catch (e) {
-                console.error("Chart update failed:", e);
+        // Grid Lines (Active Orders)
+        window.priceLines = {};
+
+        // Responsive
+        const resizeObserver = new ResizeObserver(entries => {
+            for (let entry of entries) {
+                chart.applyOptions({
+                    width: entry.contentRect.width,
+                });
             }
-        }, 2000);
-    </script>
+        });
+        resizeObserver.observe(chartContainer);
+    }
 
-    <!-- Active Orders Widget -->
-    <div class="card" style="grid-column: span 2;">
-        <h2>Active Orders</h2>
-        <div id="orders-widget" hx-get="/dashboard/orders" hx-trigger="load, every 2s">
-            <p>Loading orders...</p>
-        </div>
-    </div>
+    // --- WebSocket Setup ---
+    let socket;
+    function connectWS() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/dashboard?token=${getCookie('access_token')}`;
+        socket = new WebSocket(wsUrl);
 
-    <!-- Recent Fills Widget -->
-    <div class="card" style="grid-column: span 2;">
-        <h2>Recent Fills</h2>
-        <div id="fills-widget" hx-get="/dashboard/fills" hx-trigger="load, every 5s">
-            <p>Loading fills...</p>
-        </div>
-    </div>
-</main>
+        socket.onopen = () => {
+            console.log('Dashboard WebSocket connected');
+            document.getElementById('ws-status').innerHTML = '<span class="status-badge status-active">Connected</span>';
+        };
+
+        socket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            if (data.type === 'ticker') {
+                updateTicker(data);
+            } else if (data.type === 'health') {
+                updateHealth(data);
+            } else if (data.type === 'fill') {
+                handleFill(data);
+            } else if (data.type === 'depth') {
+                updateDepth(data);
+            }
+        };
+
+        socket.onclose = () => {
+            console.log('Dashboard WebSocket disconnected. Retrying in 5s...');
+            document.getElementById('ws-status').innerHTML = '<span class="status-badge status-inactive">Disconnected</span>';
+            setTimeout(connectWS, 5000);
+        };
+
+        socket.onerror = (err) => {
+            console.error('WebSocket error:', err);
+            socket.close();
+        };
+    }
+
+    function getCookie(name) {
+        const value = `; ${document.cookie}`;
+        const parts = value.split(`; ${name}=`);
+        if (parts.length === 2) return parts.pop().split(';').shift();
+    }
+
+    function updateTicker(data) {
+        if (lineSeries) {
+            lineSeries.update({ time: data.time || Math.floor(Date.now() / 1000), value: data.price });
+            const priceEl = document.getElementById('chart-price');
+            if (priceEl) priceEl.textContent = '$' + data.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+    }
+
+    function updateHealth(data) {
+        const cpuEl = document.getElementById('cpu-val');
+        const ramEl = document.getElementById('ram-val');
+        const botEl = document.getElementById('bot-status');
+
+        if (cpuEl) cpuEl.textContent = data.cpu_percent + '%';
+        if (ramEl) ramEl.textContent = data.ram_percent + '%';
+        if (botEl) botEl.innerHTML = data.bot_running
+            ? '<span class="status-badge status-active">Running</span>'
+            : '<span class="status-badge status-inactive">Stopped</span>';
+
+        // Circuit breaker indicator
+        const healthCard = document.getElementById('health-card');
+        if (data.circuit_open) {
+            healthCard.style.borderColor = 'var(--danger-color)';
+            healthCard.style.boxShadow = '0 0 15px rgba(239, 68, 68, 0.2)';
+        } else {
+            healthCard.style.borderColor = 'var(--border-color)';
+            healthCard.style.boxShadow = 'none';
+        }
+
+        // VPIN for informed trading
+        const vpinEl = document.getElementById('vpin-val');
+        if (vpinEl && data.vpin !== undefined) {
+            vpinEl.textContent = (data.vpin * 100).toFixed(1) + '%';
+            vpinEl.style.color = data.vpin > 0.6 ? 'var(--danger-color)' : 'var(--success-color)';
+        }
+    }
+
+    function updateDepth(data) {
+        const canvas = document.getElementById('depth-canvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width;
+        const height = canvas.height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        if (!data.density) return;
+
+        const maxVol = Math.max(...data.density.map(d => d.volume), 1);
+        const centerY = height / 2;
+        const scale = height / 20; // Show +/- 10 levels
+
+        data.density.forEach(d => {
+            const y = centerY - (d.price_offset * scale);
+            const intensity = (d.volume / maxVol) * 0.8;
+            ctx.fillStyle = d.side === 'bid'
+                ? `rgba(16, 185, 129, ${intensity})`
+                : `rgba(239, 68, 68, ${intensity})`;
+            ctx.fillRect(0, y - scale / 2, width, scale - 1);
+        });
+    }
+
+    function updatePriceLines(orders) {
+        if (!lineSeries) return;
+
+        // Remove old lines
+        Object.keys(window.priceLines).forEach(id => {
+            lineSeries.removePriceLine(window.priceLines[id]);
+            delete window.priceLines[id];
+        });
+
+        // Add current orders
+        orders.forEach(o => {
+            const pl = lineSeries.createPriceLine({
+                price: parseFloat(o.price),
+                color: o.side === 'buy' ? '#10b981' : '#ef4444',
+                lineWidth: 1,
+                lineStyle: 2, // Dashed
+                axisLabelVisible: true,
+                title: `${o.side.toUpperCase()}`,
+            });
+            window.priceLines[o.id] = pl;
+        });
+    }
+
+    function handleFill(data) {
+        // Refresh orders and fills containers via HTMX
+        htmx.trigger('#orders-container', 'load');
+        htmx.trigger('#fills-container', 'load');
+
+        // Update Chart Lines after order refresh
+        setTimeout(() => {
+            // This is a bit hacky, normally we'd pass order data in the ws message
+            // But we can trigger a fetch or wait for the next htmx load
+        }, 500);
+
+        // Visual notification (Toast)
+        const toast = document.createElement('div');
+        toast.className = 'card';
+        toast.style.position = 'fixed';
+        toast.style.bottom = '20px';
+        toast.style.right = '20px';
+        toast.style.zIndex = '2000';
+        toast.style.background = 'var(--grad-primary)';
+        toast.style.padding = '12px 20px';
+        toast.style.animation = 'fadeIn 0.3s ease-out';
+        toast.innerHTML = `<strong>✅ FILL: ${data.side} ${data.size} @ ${data.price}</strong>`;
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 5000);
+    }
+
+    // Start connection
+    connectWS();
+</script>
 {% endblock %}

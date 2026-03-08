@@ -10,3 +10,11 @@ tablib[xlsx,ods]
 openpyxl
 odfpy
 cryptography
+python-jose[cryptography]
+passlib[bcrypt]
+pyotp
+qrcode[pil]
+slowapi
+psutil
+httpx
+websockets

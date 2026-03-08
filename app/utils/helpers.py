@@ -1,31 +1,37 @@
-
 import os
 import base64
 import logging
 from pathlib import Path
+from typing import Optional
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-def _get_fernet():
-    """
-    Get a Fernet instance for encryption/decryption.
-    Uses APP_ENV_ENC_KEY to derive a key.
-    If not set, returns None.
-    """
+# Static salt for simplicity in this context (used for KDF)
+SALT = b"thumber-trader-v2-salt-long-string-for-security"
+
+def _get_key_from_env() -> Optional[bytes]:
+    """Derive a 32-byte key from APP_ENV_ENC_KEY."""
     key_str = os.getenv("APP_ENV_ENC_KEY")
     if not key_str:
         return None
     
-    # Derive a 32-byte key from the provided string
-    salt = b"thumber-trader-salt" # Static salt for simplicity in this context
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=salt,
+        salt=SALT,
         iterations=100000,
     )
-    key = base64.urlsafe_b64encode(kdf.derive(key_str.encode()))
+    return kdf.derive(key_str.encode())
+
+def _get_fernet():
+    """Get a Fernet instance using derived key (legacy)."""
+    key_bytes = _get_key_from_env()
+    if not key_bytes:
+        return None
+    # Fernet requires url-safe base64 32-byte key
+    key = base64.urlsafe_b64encode(key_bytes)
     return Fernet(key)
 
 def _should_encrypt_key(key: str) -> bool:
@@ -35,38 +41,70 @@ def _should_encrypt_key(key: str) -> bool:
         "COINBASE_API_SECRET",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
-        "DISCORD_WEBHOOK_URL"
+        "DISCORD_WEBHOOK_URL",
+        "PAGERDUTY_ROUTING_KEY",
+        "SLACK_WEBHOOK_URL"
     }
     return key.upper() in sensitive_keys
 
-def encrypt_value(value: str) -> str:
-    """Encrypt a value and prefix it with ENC: if a key is available."""
-    fernet = _get_fernet()
-    if not fernet or not value:
+def encrypt_aes(value: str) -> str:
+    """Encrypt a value using AES-256-GCM."""
+    key_bytes = _get_key_from_env()
+    if not key_bytes or not value:
         return value
     
-    if value.startswith("ENC:"):
-        return value
-        
-    encrypted = fernet.encrypt(value.encode()).decode()
-    return f"ENC:{encrypted}"
+    aesgcm = AESGCM(key_bytes)
+    nonce = os.urandom(12)
+    ciphertext = aesgcm.encrypt(nonce, value.encode(), None)
+    
+    # Store as base64(nonce + ciphertext)
+    result = base64.b64encode(nonce + ciphertext).decode()
+    return f"AES:{result}"
 
-def decrypt_value(value: str) -> str:
-    """Decrypt a value if it starts with ENC: and a key is available."""
-    if not isinstance(value, str) or not value.startswith("ENC:"):
+def decrypt_aes(value: str) -> str:
+    """Decrypt a value using AES-256-GCM."""
+    if not value.startswith("AES:"):
         return value
         
-    fernet = _get_fernet()
-    if not fernet:
-        logging.warning("Encryption key not found, cannot decrypt sensitive value.")
+    key_bytes = _get_key_from_env()
+    if not key_bytes:
+        logging.warning("Encryption key not found, cannot decrypt AES value.")
         return value
         
     try:
-        decrypted = fernet.decrypt(value[4:].encode()).decode()
-        return decrypted
+        data = base64.b64decode(value[4:])
+        nonce = data[0:12]
+        ciphertext = data[12:]
+        aesgcm = AESGCM(key_bytes)
+        return aesgcm.decrypt(nonce, ciphertext, None).decode()
     except Exception as e:
-        logging.error(f"Failed to decrypt value: {e}")
+        logging.error(f"Failed to decrypt AES value: {e}")
         return value
+
+def encrypt_value(value: str) -> str:
+    """Encrypt a value using the latest AES-256-GCM method."""
+    if not value or value.startswith("AES:") or value.startswith("ENC:"):
+        return value
+    return encrypt_aes(value)
+
+def decrypt_value(value: str) -> str:
+    """Decrypt a value, supporting both legacy Fernet (ENC:) and AES-GCM (AES:)."""
+    if not isinstance(value, str):
+        return value
+        
+    if value.startswith("AES:"):
+        return decrypt_aes(value)
+        
+    if value.startswith("ENC:"):
+        fernet = _get_fernet()
+        if not fernet:
+            return value
+        try:
+            return fernet.decrypt(value[4:].encode()).decode()
+        except Exception:
+            return value
+            
+    return value
 
 def update_env_file(updates: dict):
     """

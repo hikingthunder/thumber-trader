@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    .auth-container {
+        max-width: 440px;
+        margin: 80px auto 0;
+        padding: 0 20px;
+    }
+
+    .auth-card {
+        background: rgba(15, 23, 42, 0.8);
+        border: 1px solid var(--border-color);
+        border-radius: 20px;
+        padding: 40px;
+        backdrop-filter: blur(16px);
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    }
+
+    .auth-header {
+        text-align: center;
+        margin-bottom: 36px;
+    }
+
+    .auth-header h1 {
+        font-size: 2rem;
+        margin-bottom: 8px;
+    }
+
+    .auth-header p {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+
+    .auth-form .form-group {
+        margin-bottom: 20px;
+    }
+
+    .auth-form label {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .auth-form input {
+        width: 100%;
+        padding: 14px 18px;
+        background: var(--bg-color);
+        border: 1px solid var(--border-color);
+        color: var(--text-color);
+        border-radius: 10px;
+        font-size: 1rem;
+        transition: all 0.2s;
+        box-sizing: border-box;
+    }
+
+    .auth-form input:focus {
+        outline: none;
+        border-color: var(--accent-color);
+        box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .auth-submit {
+        width: 100%;
+        padding: 14px;
+        margin-top: 12px;
+        font-size: 1rem;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+    }
+
+    .auth-error {
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-bottom: 24px;
+        color: #f87171;
+        font-size: 0.9rem;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .auth-footer {
+        text-align: center;
+        margin-top: 24px;
+        padding-top: 20px;
+        border-top: 1px solid var(--border-color);
+    }
+
+    .auth-footer a {
+        color: var(--accent-color);
+        text-decoration: none;
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+
+    .auth-footer a:hover {
+        text-decoration: underline;
+    }
+
+    .totp-section {
+        background: rgba(56, 189, 248, 0.05);
+        border: 1px solid rgba(56, 189, 248, 0.15);
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+    }
+
+    .totp-section h3 {
+        color: var(--accent-color);
+        font-size: 0.9rem;
+        margin-bottom: 12px;
+    }
+
+    .lock-icon {
+        font-size: 3rem;
+        margin-bottom: 4px;
+    }
+
+    @keyframes shake {
+
+        0%,
+        100% {
+            transform: translateX(0);
+        }
+
+        20%,
+        60% {
+            transform: translateX(-5px);
+        }
+
+        40%,
+        80% {
+            transform: translateX(5px);
+        }
+    }
+
+    .auth-error {
+        animation: shake 0.4s ease-in-out;
+    }
+</style>
+
+<div class="auth-container">
+    <div class="auth-card">
+        <div class="auth-header">
+            <div class="lock-icon">🔐</div>
+            <h1>Thumber Trader</h1>
+            {% if show_register %}
+            <p>Create your admin account to get started</p>
+            {% elif show_totp %}
+            <p>Enter your authenticator code</p>
+            {% else %}
+            <p>Sign in to your trading dashboard</p>
+            {% endif %}
+        </div>
+
+        {% if error %}
+        <div class="auth-error">
+            <span>⚠️</span> {{ error }}
+        </div>
+        {% endif %}
+
+        {% if show_register %}
+        <!-- Registration Form -->
+        <form method="post" action="/auth/register" class="auth-form">
+            <div class="form-group">
+                <label>Username</label>
+                <input type="text" name="username" placeholder="admin" required autofocus autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" name="password" placeholder="Minimum 8 characters" required
+                    autocomplete="new-password" minlength="8">
+            </div>
+            <div class="form-group">
+                <label>Confirm Password</label>
+                <input type="password" name="password_confirm" placeholder="Re-enter password" required
+                    autocomplete="new-password">
+            </div>
+            <button type="submit" class="btn auth-submit">🚀 Create Admin Account</button>
+        </form>
+
+        {% elif show_totp %}
+        <!-- TOTP Verification -->
+        <form method="post" action="/auth/login" class="auth-form">
+            <input type="hidden" name="username" value="{{ username }}">
+            <input type="hidden" name="password" value="{{ password }}">
+            <div class="totp-section">
+                <h3>🔑 Two-Factor Authentication</h3>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px;">
+                    Open your authenticator app and enter the 6-digit code
+                </p>
+                <div class="form-group" style="margin-bottom: 0;">
+                    <input type="text" name="totp_code" placeholder="000000" required autofocus maxlength="6"
+                        pattern="[0-9]{6}" inputmode="numeric"
+                        style="text-align: center; font-size: 1.5rem; letter-spacing: 0.3em; font-weight: 700;">
+                </div>
+            </div>
+            <button type="submit" class="btn auth-submit">Verify & Sign In</button>
+        </form>
+
+        {% else %}
+        <!-- Login Form -->
+        <form method="post" action="/auth/login" class="auth-form">
+            <div class="form-group">
+                <label>Username</label>
+                <input type="text" name="username" placeholder="Enter your username" required autofocus
+                    autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" name="password" placeholder="Enter your password" required
+                    autocomplete="current-password">
+            </div>
+            <button type="submit" class="btn auth-submit">Sign In</button>
+        </form>
+        {% endif %}
+
+        <div class="auth-footer">
+            {% if show_register %}
+            <a href="/auth/login">← Back to Sign In</a>
+            {% else %}
+            <span style="color: var(--text-muted); font-size: 0.8rem;">
+                Secure access • Session expires after {{ session_timeout_minutes | default(60) }} minutes
+            </span>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

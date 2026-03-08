@@ -3,7 +3,7 @@
 {% block content %}
 <header>
     <div>
-        <h1>Thumber Trader - Export</h1>
+        <h1>📦 Data Export</h1>
         <div style="font-size: 0.9rem; color: #94a3b8;">
             Product: <span style="color: white;">{{ product_id }}</span> |
             Mode: <span style="color: {{ 'orange' if paper_trading else 'white' }};">
@@ -11,11 +11,17 @@
             </span>
         </div>
     </div>
-
     <nav>
-        <a href="/">Dashboard</a>
-        <a href="/export" style="color: var(--accent-color);">Export</a>
+        <a href="/dashboard">Dashboard</a>
         <a href="/config">Configuration</a>
+        <a href="/backtest">Backtest</a>
+        <a href="/export" class="active">Export</a>
+        <a href="/auth/audit-log">Audit Log</a>
+        <div class="nav-divider"></div>
+        {% if user %}
+        <span class="user-badge">👤 {{ user.username }}</span>
+        {% endif %}
+        <a href="/auth/logout" class="btn btn-sm btn-outline">Logout</a>
     </nav>
 </header>
 
