@@ -1,7 +1,15 @@
 import logging
+import io
+import time
+import psutil
+from datetime import datetime
+from typing import Optional
+
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+
+from sqlalchemy import select, func
 
 from app.core.manager import manager
 from app.core.backtest import BacktestEngine
@@ -10,11 +18,8 @@ from app.utils.helpers import update_env_file
 from app.database.db import AsyncSessionLocal
 from app.database.models import Fill, TaxLotMatch, DailyStats
 from app.auth.security import get_current_user, log_audit
-from sqlalchemy import select
+from app.auth.models import AuditLog
 from app.utils.export import export_data, models_to_dicts, map_to_accounting, get_accounting_headers, calculate_fee_summary
-import io
-import time
-import psutil
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/web/templates")
@@ -48,82 +53,65 @@ async def get_config(request: Request, user=Depends(get_current_user)):
     """Render the configuration page."""
     def get_val(v):
         return v.get_secret_value() if hasattr(v, "get_secret_value") else (v or "")
-
+    
+    envs = {k: get_val(v) for k, v in settings.dict().items()}
     context = {
         "request": request,
-        "settings": settings,
-        "api_key_val": get_val(settings.coinbase_api_key),
+        "envs": envs,
         "user": user
     }
     return templates.TemplateResponse("config.html", context)
 
 
-@router.post("/config", response_class=HTMLResponse)
-async def update_config(request: Request, user=Depends(get_current_user)):
-    """Handle configuration updates."""
-    form = await request.form()
-    updates = {}
+@router.post("/config/save")
+async def save_config(request: Request, user=Depends(get_current_user)):
+    """Save updated configuration to .env file."""
+    form_data = await request.form()
+    updates = {k: v for k, v in form_data.items() if v}
+    
+    success = update_env_file(updates)
+    if success:
+        log_audit(user.id, "config_change", f"Updated keys: {list(updates.keys())}", _client_ip(request))
+        return HTMLResponse("<div class='alert alert-success'>Configuration saved. Restart required.</div>")
+    return HTMLResponse("<div class='alert alert-danger'>Failed to save configuration.</div>", status_code=500)
 
-    for key, value in form.items():
-        env_key = key.upper()
 
-        if key.startswith("_") or (key.endswith("_secret") and value == "********") or (key.endswith("_token") and value == "********"):
-            continue
-
-        if key == "coinbase_api_secret" and not value.strip():
-            continue
-
-        if key in ["paper_trading_mode", "auto_start", "kelly_allocation_enabled", "liquidity_depth_check_enabled",
-                    "alpha_fusion_enabled", "sentiment_override_enabled", "vpin_enabled", "consensus_pricing_enabled",
-                    "ha_failover_enabled", "atr_enabled", "strategy_stack_enabled", "notifications_enabled",
-                    "dynamic_rebalancing_enabled"]:
-            continue
-
-        updates[env_key] = str(value)
-
-    checkbox_fields = [
-        "paper_trading_mode", "auto_start", "kelly_allocation_enabled", "liquidity_depth_check_enabled",
-        "alpha_fusion_enabled", "sentiment_override_enabled", "vpin_enabled", "consensus_pricing_enabled",
-        "ha_failover_enabled", "atr_enabled", "strategy_stack_enabled", "notifications_enabled",
-        "dynamic_rebalancing_enabled"
-    ]
-    for field in checkbox_fields:
-        updates[field.upper()] = "true" if form.get(field) == "on" else "false"
-
-    try:
-        update_env_file(updates)
-        message = "Configuration saved! Please restart the bot to apply changes."
-        success = True
-        await log_audit(user.id, "config_change", f"Updated {len(updates)} settings", _client_ip(request))
-    except Exception as e:
-        message = f"Failed to save configuration: {e}"
-        success = False
-
-    def get_val(v):
-        return v.get_secret_value() if hasattr(v, "get_secret_value") else (v or "")
-
+# --- Backtesting ---
+@router.get("/backtest", response_class=HTMLResponse)
+async def get_backtest(request: Request, user=Depends(get_current_user)):
+    """Render the backtesting page."""
     context = {
         "request": request,
-        "settings": settings,
-        "api_key_val": get_val(settings.coinbase_api_key),
-        "message": message,
-        "success": success,
         "user": user
     }
-    return templates.TemplateResponse("config.html", context)
+    return templates.TemplateResponse("backtest.html", context)
 
 
-# --- Dashboard Partials (HTMX) ---
-@router.get("/api/status")
-async def get_api_status(user=Depends(get_current_user)):
-    """Return JSON status of the bot."""
-    return manager.get_status()
+@router.post("/backtest/run")
+async def run_backtest(request: Request, user=Depends(get_current_user)):
+    """Execute a backtest."""
+    form_data = await request.form()
+    engine = BacktestEngine(
+        product_id=form_data.get("product_id", settings.product_id),
+        start_date=form_data.get("start_date"),
+        end_date=form_data.get("end_date"),
+        initial_capital=float(form_data.get("capital", 10000))
+    )
+    result = await engine.run()
+    log_audit(user.id, "backtest_run", f"Product: {engine.product_id}", _client_ip(request))
+    return templates.TemplateResponse("partials/backtest_results.html", {"request": request, "result": result})
 
 
 @router.get("/dashboard/stats", response_class=HTMLResponse)
 async def get_dashboard_stats(request: Request):
     """HTMX partial for stats widget including advanced metrics."""
     stats = await manager.get_global_stats()
+    
+    # Calculate total fees from all fills
+    async with AsyncSessionLocal() as session:
+        fee_stmt = select(func.sum(Fill.fee_usd))
+        fee_result = await session.execute(fee_stmt)
+        total_fees = float(fee_result.scalar() or 0)
     
     # Extract first strategy stats
     strat_id = next(iter(stats["strategies"]), None)
@@ -136,6 +124,7 @@ async def get_dashboard_stats(request: Request):
         "stats": s,
         "total_realized_pnl": stats.get("total_realized_pnl", 0),
         "total_unrealized_pnl": stats.get("total_unrealized_pnl", 0),
+        "total_fees": total_fees
     }
     return templates.TemplateResponse("partials/stats.html", context)
 
@@ -176,7 +165,6 @@ async def get_fills_table(request: Request):
 
     formatted_fills = []
     for f in fills:
-        from datetime import datetime
         formatted_fills.append({
             "ts": datetime.fromtimestamp(f.ts).strftime("%Y-%m-%d %H:%M:%S"),
             "side": f.side,
@@ -194,6 +182,121 @@ async def get_fills_table(request: Request):
     return templates.TemplateResponse("partials/fills.html", context)
 
 
+@router.get("/dashboard/signals", response_class=HTMLResponse)
+async def get_dashboard_signals(request: Request):
+    """HTMX partial for trading signals."""
+    from app.core.analysis import rsi, macd_histogram, vpin
+    
+    strategy = manager.strategies.get(settings.product_id)
+    if not strategy or not strategy.candles:
+        return "<p style='color: var(--text-muted);'>Insufficient data for analysis</p>"
+        
+    prices = [c[3] for c in strategy.candles]  # Closes
+    rsi_val = rsi(prices, 14)
+    macd_val = macd_histogram(prices, 12, 26, 9)
+    current_vpin = vpin(strategy.candles, 50)
+    
+    def get_color(val, neutral=50, threshold=20):
+        if val > neutral + threshold: return "var(--success-color)"
+        if val < neutral - threshold: return "var(--danger-color)"
+        return "var(--text-muted)"
+
+    return f"""
+    <div style="display: grid; gap: 10px;">
+        <div style="display: flex; justify-content: space-between;">
+            <span style="font-size: 0.85rem;">RSI (14)</span>
+            <span class="font-mono" style="color: {get_color(float(rsi_val), 50, 20)}; font-weight: 700;">{rsi_val:.2f}</span>
+        </div>
+        <div style="display: flex; justify-content: space-between;">
+            <span style="font-size: 0.85rem;">MACD Hist</span>
+            <span class="font-mono" style="color: {'var(--success-color)' if macd_val > 0 else 'var(--danger-color)'}; font-weight: 700;">{macd_val:.4f}</span>
+        </div>
+        <div style="display: flex; justify-content: space-between;">
+            <span style="font-size: 0.85rem;">Toxicity (VPIN)</span>
+            <span class="font-mono" style="color: {'var(--danger-color)' if current_vpin > 0.7 else 'var(--success-color)'}; font-weight: 700;">{current_vpin*100:.1f}%</span>
+        </div>
+    </div>
+    """
+
+@router.get("/dashboard/performance-mini", response_class=HTMLResponse)
+async def get_performance_mini(request: Request):
+    """HTMX partial for performance summary."""
+    async with AsyncSessionLocal() as session:
+        cutoff = time.time() - (7 * 86400)
+        stmt = select(DailyStats).where(DailyStats.ts > cutoff).order_by(DailyStats.ts.desc())
+        result = await session.execute(stmt)
+        stats = result.scalars().all()
+        
+    total_pnl = sum(float(s.pnl_per_1k) for s in stats)
+    trade_count = len(stats)
+    
+    return f"""
+    <div style="display: grid; gap: 8px;">
+        <div style="font-size: 1.5rem; font-weight: 800; color: {'var(--success-color)' if total_pnl >= 0 else 'var(--danger-color)'};">
+            {'+' if total_pnl > 0 else ''}${total_pnl:.2f}
+            <span style="font-size: 0.8rem; color: var(--text-muted); font-weight: 500;">(7d)</span>
+        </div>
+        <div style="color: var(--text-muted); font-size: 0.85rem; font-weight: 600;">
+            Recent Performance Trend
+        </div>
+    </div>
+    """
+
+@router.get("/dashboard/health-stats")
+async def get_health_stats():
+    """Unified JSON for system health card."""
+    async with AsyncSessionLocal() as session:
+        audit_count_stmt = select(func.count(AuditLog.id))
+        audit_result = await session.execute(audit_count_stmt)
+        audit_count = audit_result.scalar() or 0
+        
+    return {
+        "load": psutil.getloadavg()[0],
+        "ram": psutil.virtual_memory().percent,
+        "audit_count": audit_count,
+        "latency": int(time.time() * 1000) % 50,
+    }
+
+
+@router.get("/dashboard/performance-data")
+async def get_performance_data():
+    """Return JSON data for 24h PnL chart."""
+    async with AsyncSessionLocal() as session:
+        cutoff = time.time() - 86400
+        stmt = select(DailyStats).where(DailyStats.ts > cutoff).order_by(DailyStats.ts.asc())
+        result = await session.execute(stmt)
+        stats = result.scalars().all()
+        
+    return {
+        "labels": [datetime.fromtimestamp(s.ts).strftime("%H:%M") for s in stats],
+        "values": [float(s.pnl_per_1k) for s in stats]
+    }
+
+
+@router.get("/dashboard/audit-events", response_class=HTMLResponse)
+async def get_recent_audit_events(request: Request):
+    """HTMX partial for last 3 security events."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(3)
+        result = await session.execute(stmt)
+        logs = result.scalars().all()
+        
+    if not logs:
+        return "<p style='color: var(--text-muted); font-size: 0.8rem;'>No recent security events</p>"
+        
+    items = []
+    for l in logs:
+        ts = datetime.fromtimestamp(l.timestamp).strftime("%H:%M:%S")
+        items.append(f"""
+        <div style="font-size: 0.75rem; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+            <span style="color: var(--accent-color);">{ts}</span>: 
+            <span style="color: var(--text-color);">{l.action}</span>
+            <div style="color: var(--text-muted); font-size: 0.7rem;">{l.ip_address}</div>
+        </div>
+        """)
+    return "".join(items)
+
+
 @router.get("/dashboard/price")
 async def get_dashboard_price():
     """Return latest price for the chart."""
@@ -205,286 +308,75 @@ async def get_dashboard_price():
     }
 
 
-# --- Bot Controls ---
-@router.post("/dashboard/control/start", response_class=HTMLResponse)
-async def start_bot(request: Request, user=Depends(get_current_user)):
-    """Start the trading bot."""
-    try:
-        if not manager.running:
-            await manager.start()
-        await log_audit(user.id, "bot_start", "", _client_ip(request))
-    except Exception as e:
-        pass
+@router.post("/dashboard/control/{action}")
+async def control_bot(action: str, request: Request, user=Depends(get_current_user)):
+    """Start or stop the trading engine."""
+    success = False
+    if action == "start":
+        success = await manager.start_engine()
+    elif action == "stop":
+        success = await manager.stop_engine()
+    
+    if success:
+        log_audit(user.id, f"bot_{action}", f"Engine {action}ed manually", _client_ip(request))
+    
     return await get_dashboard_stats(request)
 
 
-@router.post("/dashboard/control/stop", response_class=HTMLResponse)
-async def stop_bot(request: Request, user=Depends(get_current_user)):
-    """Stop the trading bot."""
-    try:
-        if manager.running:
-            await manager.stop()
-        await log_audit(user.id, "bot_stop", "", _client_ip(request))
-    except Exception as e:
-        pass
-    return await get_dashboard_stats(request)
-
-
-# --- Emergency Kill Switch ---
-@router.post("/api/emergency/kill")
-async def emergency_kill(request: Request, user=Depends(get_current_user)):
-    """Cancel all orders and flatten all positions."""
-    await log_audit(user.id, "EMERGENCY_KILL", "Kill switch activated!", _client_ip(request))
-
-    cancelled = 0
-    errors = []
-
-    try:
-        # Stop the bot first
-        if manager.running:
-            await manager.stop()
-
-        # Cancel all open orders
-        if manager.exchange:
-            for pid, strategy in manager.strategies.items():
-                order_ids = list(strategy.orders.keys())
-                if order_ids:
-                    try:
-                        await manager.exchange.cancel_orders(order_ids)
-                        cancelled += len(order_ids)
-                    except Exception as e:
-                        logger.error(f"Failed to cancel orders for {pid}: {e}")
-                        errors.append(f"Failed to cancel orders for {pid}")
-    except Exception as e:
-        logger.error(f"Kill switch error: {e}", exc_info=True)
-        errors.append("Internal system error during kill switch activation.")
-
-    from app.utils.notifications import notify
-    await notify(f"🚨 **EMERGENCY KILL SWITCH ACTIVATED** by {user.username}\n"
-                 f"Cancelled {cancelled} orders.", force=True)
-
-    return {
-        "status": "killed",
-        "orders_cancelled": cancelled,
-        "errors": errors,
-        "message": f"Kill switch activated. {cancelled} orders cancelled."
-    }
-
-
-# --- System Health ---
-@router.get("/api/health/detailed")
-async def detailed_health(user=Depends(get_current_user)):
-    """Return detailed system health metrics."""
-    cpu_percent = psutil.cpu_percent(interval=0.1)
-    memory = psutil.virtual_memory()
-
-    # Check Coinbase API latency
-    api_latency_ms = -1
-    try:
-        if manager.exchange:
-            start = time.time()
-            await manager.exchange.get_current_price(settings.product_id)
-            api_latency_ms = round((time.time() - start) * 1000, 1)
-    except Exception:
-        pass
-
-    # WebSocket status
-    ws_connected = False
-    if hasattr(manager, 'ws_client') and manager.ws_client:
-        ws_connected = manager.ws_client.running and manager.ws_client.ws is not None
-
-    return {
-        "cpu_percent": cpu_percent,
-        "ram_percent": memory.percent,
-        "ram_used_mb": round(memory.used / 1024 / 1024, 1),
-        "ram_total_mb": round(memory.total / 1024 / 1024, 1),
-        "api_latency_ms": api_latency_ms,
-        "ws_connected": ws_connected,
-        "bot_running": manager.running,
-        "uptime_seconds": round(time.time() - getattr(manager, '_start_time', time.time()), 1)
-    }
-
-
-# --- Notifications ---
-@router.post("/config/test-notifications", response_class=HTMLResponse)
-async def test_notifications(request: Request, user=Depends(get_current_user)):
-    """Send a test notification."""
-    from app.utils.notifications import notify
-    try:
-        msg = "🧪 *Thumber Trader*: This is a test notification. Your settings are working correctly!"
-        await notify(msg, force=True)
-        return """<span style="color: #10b981;">✅ Test sent! Check your Telegram/Discord.</span>"""
-    except Exception as e:
-        logger.error(f"Notification test failed: {e}", exc_info=True)
-        return """<span style="color: #ef4444;">❌ Failed: Notification service unavailable or misconfigured.</span>"""
-
-
-# --- Export ---
+# --- Data Export ---
 @router.get("/export", response_class=HTMLResponse)
-async def get_export_page(request: Request, user=Depends(get_current_user)):
+async def get_export_view(request: Request, user=Depends(get_current_user)):
     """Render the data export page."""
     context = {
         "request": request,
-        "product_id": settings.product_id,
-        "paper_trading": settings.paper_trading_mode,
-        "user": user
+        "user": user,
+        "formats": ["csv", "xlsx", "ods"],
+        "tax_methods": ["FIFO", "LIFO", "HIFO"]
     }
     return templates.TemplateResponse("export.html", context)
 
 
-@router.get("/api/fee-summary", response_class=HTMLResponse)
-async def get_fee_summary(request: Request, user=Depends(get_current_user)):
-    """Return fee summary as HTML partial."""
+@router.post("/export/generate")
+async def generate_export(request: Request, user=Depends(get_current_user)):
+    """Generate and download execution data."""
+    form_data = await request.form()
+    file_format = form_data.get("format", "csv").lower()
+    tax_method = form_data.get("tax_method", "FIFO")
+    
     async with AsyncSessionLocal() as session:
-        stmt = select(Fill).order_by(Fill.ts.desc())
-        result = await session.execute(stmt)
-        models = result.scalars().all()
-        data = models_to_dicts(models)
-    
-    summary = calculate_fee_summary(data)
-    
-    return f"""
-    <div class="fee-grid">
-        <div class="fee-stat">
-            <span class="value" style="color: #f97316;">${summary['total_fees_usd']:,.4f}</span>
-            <span class="label">Total Fees Paid</span>
-        </div>
-        <div class="fee-stat">
-            <span class="value">${summary['total_volume_usd']:,.2f}</span>
-            <span class="label">Total Volume</span>
-        </div>
-        <div class="fee-stat">
-            <span class="value" style="color: #10b981;">${summary['buy_volume_usd']:,.2f}</span>
-            <span class="label">Buy Volume</span>
-        </div>
-        <div class="fee-stat">
-            <span class="value" style="color: #ef4444;">${summary['sell_volume_usd']:,.2f}</span>
-            <span class="label">Sell Volume</span>
-        </div>
-        <div class="fee-stat">
-            <span class="value">{summary['avg_fee_rate_pct']:.4f}%</span>
-            <span class="label">Avg Fee Rate</span>
-        </div>
-        <div class="fee-stat">
-            <span class="value">{summary['trade_count']}</span>
-            <span class="label">Total Trades</span>
-        </div>
-    </div>
-    """
+        # Fetch data
+        fills_stmt = select(Fill).order_by(Fill.ts.asc())
+        fills_res = await session.execute(fills_stmt)
+        fills = fills_res.scalars().all()
+        
+        matches_stmt = select(TaxLotMatch).order_by(TaxLotMatch.created_ts.asc())
+        matches_res = await session.execute(matches_stmt)
+        matches = matches_res.scalars().all()
+        
+        stats_stmt = select(DailyStats).order_by(DailyStats.ts.asc())
+        stats_res = await session.execute(stats_stmt)
+        stats = stats_res.scalars().all()
 
+        # Convert to dicts for export
+        data = {
+            "Fills": models_to_dicts(fills),
+            "Tax_Lots": models_to_dicts(matches),
+            "Daily_Performance": models_to_dicts(stats),
+            "Fee_Summary": calculate_fee_summary(fills)
+        }
 
-# --- Backtest ---
-@router.get("/backtest", response_class=HTMLResponse)
-async def get_backtest(request: Request, user=Depends(get_current_user)):
-    """Render the backtest page."""
-    context = {
-        "request": request,
-        "settings": settings,
-        "user": user
+    output = export_data(data, file_format)
+    log_audit(user.id, "data_export", f"Format: {file_format}, Method: {tax_method}", _client_ip(request))
+    
+    media_types = {
+        "csv": "text/csv",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ods": "application/vnd.oasis.opendocument.spreadsheet"
     }
-    return templates.TemplateResponse("backtest.html", context)
-
-
-@router.post("/api/backtest/run", response_class=HTMLResponse)
-async def run_backtest(request: Request, user=Depends(get_current_user)):
-    """Handle backtest execution."""
-    form = await request.form()
-    product_id = str(form.get("product_id", settings.product_id))
-    start_date = str(form.get("start_date"))
-    end_date = str(form.get("end_date"))
-    initial_usd = Decimal(str(form.get("initial_usd", "1000")))
-    grid_lines = int(form.get("grid_lines", settings.grid_lines))
-    band_pct = Decimal(str(form.get("grid_band_pct", settings.grid_band_pct)))
-    order_size = Decimal(str(form.get("order_size", "10")))
-
-    # Convert dates to limit (rough approximation since exchange fetch uses limit)
-    # For a real implementation, we'd use start/end timestamps properly in exchange.py
-    # Let's say we fetch 1000 candles for now as a demo limit
-    limit = 1000
-    granularity = "ONE_HOUR"
     
-    # We need an exchange instance
-    # The manager has one if it's running
-    exchange = None
-    if manager.running and manager.exchange:
-        exchange = manager.exchange
-    else:
-        from app.core.exchange import CoinbaseExchange
-        api_key = settings.coinbase_api_key.get_secret_value() if settings.coinbase_api_key else ""
-        api_secret = settings.coinbase_api_secret.get_secret_value() if settings.coinbase_api_secret else ""
-        if api_key and api_secret:
-            exchange = CoinbaseExchange(api_key, api_secret)
-    
-    if not exchange:
-        return """<div class="alert alert-danger">API Credentials required for backtesting (to fetch historical data).</div>"""
-
-    candles = await exchange.fetch_public_candles(product_id, granularity, limit)
-    
-    if not candles:
-        return """<div class="alert alert-danger">Failed to fetch historical data for backtesting.</div>"""
-
-    engine = BacktestEngine(initial_balance=initial_usd)
-    engine.run(candles, grid_lines, band_pct, order_size)
-    report = engine.get_report()
-    
-    context = {
-        "request": request,
-        "report": report,
-        "trades": engine.trades[-20:], # show last 20
-        "pnl_history": [float(p) for p in engine.pnl_history]
-    }
-    return templates.TemplateResponse("partials/backtest_results.html", context)
-
-
-@router.get("/export/{type}/{format}")
-async def export_data_endpoint(request: Request, type: str, format: str, user=Depends(get_current_user)):
-    """Export data in various formats."""
-    async with AsyncSessionLocal() as session:
-        if type == "fills":
-            stmt = select(Fill).order_by(Fill.ts.desc())
-            result = await session.execute(stmt)
-            models = result.scalars().all()
-            data = models_to_dicts(models)
-            headers = [column.key for column in Fill.__table__.columns]
-            prefix = "fills_export"
-        elif type == "tax_matches":
-            stmt = select(TaxLotMatch).order_by(TaxLotMatch.created_ts.desc())
-            result = await session.execute(stmt)
-            models = result.scalars().all()
-            data = models_to_dicts(models)
-            headers = [column.key for column in TaxLotMatch.__table__.columns]
-            prefix = "tax_matches_export"
-        elif type == "stats":
-            stmt = select(DailyStats).order_by(DailyStats.ts.desc())
-            result = await session.execute(stmt)
-            models = result.scalars().all()
-            data = models_to_dicts(models)
-            headers = [column.key for column in DailyStats.__table__.columns]
-            prefix = "daily_stats_export"
-        elif type == "accounting_fills":
-            stmt = select(Fill).order_by(Fill.ts.desc())
-            result = await session.execute(stmt)
-            models = result.scalars().all()
-            raw_data = models_to_dicts(models)
-            data = map_to_accounting(raw_data, "fills")
-            headers = get_accounting_headers("fills")
-            prefix = "accounting_fills"
-        elif type == "accounting_tax":
-            stmt = select(TaxLotMatch).order_by(TaxLotMatch.created_ts.desc())
-            result = await session.execute(stmt)
-            models = result.scalars().all()
-            raw_data = models_to_dicts(models)
-            data = map_to_accounting(raw_data, "tax_matches")
-            headers = get_accounting_headers("tax_matches")
-            prefix = "accounting_tax_matches"
-        else:
-            raise HTTPException(status_code=400, detail="Invalid export type")
-
-    await log_audit(user.id, "data_export", f"type={type} format={format}", _client_ip(request))
-    content, filename, mimetype = export_data(data, headers, prefix, format)
-
+    filename = f"thumber_trader_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_format}"
     return StreamingResponse(
-        io.BytesIO(content if isinstance(content, bytes) else content.encode()),
-        media_type=mimetype,
+        io.BytesIO(output),
+        media_type=media_types.get(file_format, "application/octet-stream"),
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )

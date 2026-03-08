@@ -1,37 +1,30 @@
-<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
     <!-- Primary PnL -->
-    <div class="stat-item"
-        style="grid-column: span 2; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; margin-bottom: 5px;">
-        <span class="stat-label">Total Realized PnL</span>
-        <span class="stat-value"
-            style="font-size: 1.4rem; color: {% if total_realized_pnl >= 0 %}var(--success-color){% else %}var(--danger-color){% endif %};">
-            {% if total_realized_pnl >= 0 %}+{% endif %}${{ "{:,.2f}".format(total_realized_pnl) }}
-        </span>
+    <div class="stat-item" style="grid-column: span 2; border-bottom: 1px solid var(--border-color); padding-bottom: 16px; margin-bottom: 8px;">
+        <span class="stat-label">Net Realized Profit</span>
+        <div style="display: flex; align-items: baseline; gap: 8px;">
+            <span class="stat-value pnl-{{ 'pos' if total_realized_pnl >= 0 else 'neg' }}" style="font-size: 1.8rem;">
+                {% if total_realized_pnl >= 0 %}+{% endif %}${{ "{:,.2f}".format(total_realized_pnl) }}
+            </span>
+            <span style="color: var(--text-muted); font-size: 0.8rem; font-weight: 600;">USD</span>
+        </div>
     </div>
 
     <div class="stat-item">
         <span class="stat-label">Unrealized PnL</span>
-        <span class="stat-value"
-            style="color: {% if total_unrealized_pnl >= 0 %}var(--success-color){% else %}var(--danger-color){% endif %};">
+        <span class="stat-value pnl-{{ 'pos' if total_unrealized_pnl >= 0 else 'neg' }}">
             {% if total_unrealized_pnl >= 0 %}+{% endif %}${{ "{:,.2f}".format(total_unrealized_pnl) }}
         </span>
     </div>
 
     <div class="stat-item">
-        <span class="stat-label">Active Orders</span>
-        <span class="stat-value font-mono">{{ stats.orders_count }}</span>
-    </div>
-
-    <!-- Advanced Quant Metrics -->
-    <div class="stat-item">
-        <span class="stat-label">Max Drawdown</span>
-        <span class="stat-value" style="color: var(--danger-color);">{{ "{:.2f}%".format(stats.max_drawdown_pct)
-            }}</span>
+        <span class="stat-label">Fees Paid</span>
+        <span class="stat-value" style="color: var(--warning-color);">${{ "{:,.2f}".format(total_fees) }}</span>
     </div>
 
     <div class="stat-item">
-        <span class="stat-label">Sharpe Ratio</span>
-        <span class="stat-value" style="color: var(--accent-color);">{{ "{:.2f}".format(stats.sharpe_ratio) }}</span>
+        <span class="stat-label">Grid Spacing</span>
+        <span class="stat-value font-mono" style="color: var(--accent-color);">{{ "{:.2f}%".format(stats.grid_spacing_base * 100) if stats.grid_spacing_base else 'DYNAMIC' }}</span>
     </div>
 
     <div class="stat-item">
@@ -40,50 +33,31 @@
     </div>
 
     <div class="stat-item">
-        <span class="stat-label">Recovery Est.</span>
-        <span class="stat-value">{{ "{:.1f} hrs".format(stats.recovery_time_hours) }}</span>
+        <span class="stat-label">Max Drawdown</span>
+        <span class="stat-value neg">{{ "{:.2f}%".format(stats.max_drawdown_pct) }}</span>
+    </div>
+
+    <div class="stat-item">
+        <span class="stat-label">Sharpe Ratio</span>
+        <span class="stat-value" style="color: var(--accent-color);">{{ "{:.2f}".format(stats.sharpe_ratio) }}</span>
     </div>
 </div>
 
 <div style="margin-top: 15px; display: flex; align-items: center; gap: 8px;">
-    <div class="status-indicator {% if running %}status-active{% else %}status-inactive{% endif %}"></div>
+    <div class="status-indicator {{ 'status-active' if running else 'status-inactive' }}"></div>
     <span style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">
         Bot {{ "Active" if running else "Paused" }}
     </span>
 </div>
 
 <style>
-    .stat-item {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-    }
-
-    .stat-label {
-        font-size: 0.7rem;
-        color: var(--text-muted);
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        font-weight: 600;
-    }
-
-    .stat-value {
-        font-size: 1.1rem;
-        font-weight: 700;
-    }
-
-    .status-indicator {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-    }
-
-    .status-active {
-        background-color: var(--success-color);
-        box-shadow: 0 0 8px var(--success-color);
-    }
-
-    .status-inactive {
-        background-color: var(--danger-color);
-    }
+    .pnl-pos { color: var(--success-color); }
+    .pnl-neg { color: var(--danger-color); }
+    .neg { color: var(--danger-color); }
+    .stat-item { display: flex; flex-direction: column; gap: 4px; }
+    .stat-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; font-weight: 700; }
+    .stat-value { font-size: 1.15rem; font-weight: 800; letter-spacing: -0.02em; }
+    .status-indicator { width: 10px; height: 10px; border-radius: 50%; transition: all 0.3s ease; }
+    .status-active { background-color: var(--success-color); box-shadow: 0 0 12px var(--success-color); }
+    .status-inactive { background-color: var(--danger-color); }
 </style>

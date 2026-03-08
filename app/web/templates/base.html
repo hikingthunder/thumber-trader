@@ -10,6 +10,8 @@
     <title>Thumber Trader</title>
     <!-- HTMX -->
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -20,18 +22,19 @@
     <style>
         :root {
             --bg-color: #020617;
-            --card-bg: #0f172a;
+            --card-bg: rgba(15, 23, 42, 0.6);
             --text-color: #f8fafc;
             --text-muted: #94a3b8;
             --accent-color: #38bdf8;
-            --accent-glow: rgba(56, 189, 248, 0.4);
+            --accent-glow: rgba(56, 189, 248, 0.3);
             --success-color: #10b981;
             --danger-color: #ef4444;
             --warning-color: #f59e0b;
-            --border-color: #1e293b;
+            --border-color: rgba(30, 41, 59, 0.7);
             --grad-primary: linear-gradient(135deg, #38bdf8 0%, #1d4ed8 100%);
-            --grad-surface: linear-gradient(180deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.9) 100%);
+            --grad-surface: linear-gradient(180deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.8) 100%);
             --grad-danger: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+            --glass-border: 1px solid rgba(255, 255, 255, 0.08);
         }
 
         * {
@@ -42,8 +45,8 @@
             font-family: 'Inter', system-ui, -apple-system, sans-serif;
             background-color: var(--bg-color);
             background-image:
-                radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.05) 0%, transparent 50%),
-                radial-gradient(circle at 0% 100%, rgba(29, 78, 216, 0.05) 0%, transparent 50%);
+                radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.08) 0%, transparent 50%),
+                radial-gradient(circle at 0% 100%, rgba(29, 78, 216, 0.08) 0%, transparent 50%);
             color: var(--text-color);
             margin: 0;
             padding: 20px;
@@ -61,8 +64,11 @@
             justify-content: space-between;
             align-items: center;
             margin-bottom: 32px;
-            padding-bottom: 16px;
-            border-bottom: 1px solid var(--border-color);
+            padding: 16px 24px;
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border-radius: 16px;
+            border: var(--glass-border);
             flex-wrap: wrap;
             gap: 12px;
         }
@@ -83,104 +89,128 @@
         nav a {
             color: var(--text-muted);
             text-decoration: none;
-            padding: 6px 14px;
-            border-radius: 8px;
-            font-weight: 500;
+            padding: 8px 16px;
+            border-radius: 10px;
+            font-weight: 600;
             font-size: 0.9rem;
-            transition: all 0.2s ease;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
 
         nav a:hover {
             color: var(--accent-color);
-            background: rgba(56, 189, 248, 0.08);
+            background: rgba(56, 189, 248, 0.1);
         }
 
         nav a.active {
             color: var(--accent-color);
-            background: rgba(56, 189, 248, 0.12);
+            background: rgba(56, 189, 248, 0.15);
+            box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.2);
         }
 
         nav .nav-divider {
             width: 1px;
-            height: 20px;
+            height: 24px;
             background: var(--border-color);
-            margin: 0 4px;
+            margin: 0 8px;
         }
 
         .user-badge {
             display: inline-flex;
             align-items: center;
-            gap: 6px;
-            padding: 4px 12px;
-            border-radius: 8px;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 10px;
             background: rgba(56, 189, 248, 0.1);
             color: var(--accent-color);
-            font-size: 0.8rem;
-            font-weight: 600;
+            font-size: 0.85rem;
+            font-weight: 700;
+            border: 1px solid rgba(56, 189, 248, 0.1);
         }
 
         h1 {
             margin: 0;
-            font-size: 1.5rem;
-            font-weight: 800;
+            font-size: 1.6rem;
+            font-weight: 850;
             background: var(--grad-primary);
             -webkit-background-clip: text;
             background-clip: text;
             -webkit-text-fill-color: transparent;
-            letter-spacing: -0.025em;
+            letter-spacing: -0.03em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
 
         h2 {
-            font-size: 1.15rem;
-            margin-bottom: 1rem;
-            font-weight: 600;
+            font-size: 1.1rem;
+            margin-bottom: 1.25rem;
+            font-weight: 700;
             letter-spacing: -0.01em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-color);
         }
 
         .dashboard-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-            gap: 20px;
+            gap: 24px;
         }
 
         .card {
             background: var(--grad-surface);
-            border-radius: 14px;
-            padding: 22px;
-            box-shadow: 0 8px 12px -3px rgba(0, 0, 0, 0.1);
-            border: 1px solid var(--border-color);
-            backdrop-filter: blur(12px);
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            border-radius: 18px;
+            padding: 24px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            border: var(--glass-border);
+            backdrop-filter: blur(16px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
         }
 
         .card:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 16px 24px -4px rgba(0, 0, 0, 0.15);
-            border-color: rgba(56, 189, 248, 0.15);
+            transform: translateY(-4px);
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2);
+            border-color: rgba(56, 189, 248, 0.3);
         }
 
         .btn {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            padding: 8px 18px;
-            border-radius: 8px;
+            padding: 10px 20px;
+            border-radius: 10px;
             background: var(--grad-primary);
             color: white;
             text-decoration: none;
             cursor: pointer;
             border: none;
-            font-weight: 600;
+            font-weight: 700;
             font-size: 0.85rem;
-            transition: all 0.2s ease;
-            box-shadow: 0 2px 4px rgba(56, 189, 248, 0.15);
-            gap: 6px;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 4px 6px -1px rgba(56, 189, 248, 0.2);
+            gap: 8px;
         }
 
         .btn:hover {
-            filter: brightness(1.1);
-            transform: translateY(-1px);
-            box-shadow: 0 6px 12px rgba(56, 189, 248, 0.2);
+            filter: brightness(1.15);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgba(56, 189, 248, 0.3);
         }
 
         .btn:active {
@@ -188,22 +218,22 @@
         }
 
         .btn-sm {
-            padding: 5px 12px;
+            padding: 6px 14px;
             font-size: 0.8rem;
         }
 
         .btn-danger {
             background: var(--grad-danger);
-            box-shadow: 0 2px 4px rgba(239, 68, 68, 0.15);
+            box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.2);
         }
 
         .btn-danger:hover {
-            box-shadow: 0 6px 12px rgba(239, 68, 68, 0.2);
+            box-shadow: 0 10px 15px -3px rgba(239, 68, 68, 0.3);
         }
 
         .btn-success {
-            background: linear-gradient(135deg, #10b981 0%, #047857 100%);
-            box-shadow: 0 2px 4px rgba(16, 185, 129, 0.15);
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            box-shadow: 0 4px 6px -1px rgba(16, 185, 129, 0.2);
         }
 
         .btn-outline {
@@ -216,228 +246,221 @@
         .btn-outline:hover {
             border-color: var(--accent-color);
             color: var(--accent-color);
-            box-shadow: none;
+            background: rgba(56, 189, 248, 0.05);
         }
 
-        /* Kill Switch */
         .btn-kill {
-            background: linear-gradient(135deg, #dc2626 0%, #7f1d1d 100%);
-            box-shadow: 0 0 20px rgba(220, 38, 38, 0.3);
+            background: linear-gradient(135deg, #ef4444 0%, #991b1b 100%);
+            box-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
             animation: killPulse 2s infinite;
-            font-weight: 700;
-            letter-spacing: 0.5px;
+            font-weight: 800;
+            text-transform: uppercase;
         }
 
         @keyframes killPulse {
-
-            0%,
-            100% {
-                box-shadow: 0 0 10px rgba(220, 38, 38, 0.3);
-            }
-
-            50% {
-                box-shadow: 0 0 25px rgba(220, 38, 38, 0.5);
-            }
+            0%, 100% { box-shadow: 0 0 15px rgba(239, 68, 68, 0.3); transform: scale(1); }
+            50% { box-shadow: 0 0 30px rgba(239, 68, 68, 0.6); transform: scale(1.02); }
         }
 
         table {
             width: 100%;
             border-collapse: separate;
             border-spacing: 0;
-            font-size: 0.85rem;
+            font-size: 0.875rem;
         }
 
-        th,
-        td {
+        th, td {
             text-align: left;
-            padding: 12px 14px;
+            padding: 14px;
             border-bottom: 1px solid var(--border-color);
         }
 
         th {
             color: var(--text-muted);
-            font-weight: 600;
+            font-weight: 700;
             text-transform: uppercase;
-            font-size: 0.7rem;
-            letter-spacing: 0.06em;
-        }
-
-        tr:last-child td {
-            border-bottom: none;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+            background: rgba(255, 255, 255, 0.02);
         }
 
         tr:hover td {
-            background: rgba(255, 255, 255, 0.02);
+            background: rgba(255, 255, 255, 0.03);
         }
 
         .status-badge {
             display: inline-flex;
             align-items: center;
-            padding: 3px 10px;
-            border-radius: 9999px;
+            padding: 4px 12px;
+            border-radius: 8px;
             font-size: 0.7rem;
-            font-weight: 700;
-            letter-spacing: 0.025em;
+            font-weight: 800;
+            letter-spacing: 0.05em;
             text-transform: uppercase;
+            gap: 6px;
         }
 
         .status-active {
-            background-color: rgba(16, 185, 129, 0.1);
+            background: rgba(16, 185, 129, 0.1);
             color: #34d399;
             border: 1px solid rgba(16, 185, 129, 0.2);
         }
 
         .status-inactive {
-            background-color: rgba(239, 68, 68, 0.1);
+            background: rgba(239, 68, 68, 0.1);
             color: #f87171;
             border: 1px solid rgba(239, 68, 68, 0.2);
         }
 
-        .text-right {
-            text-align: right;
-        }
-
-        .mt-4 {
-            margin-top: 1.5rem;
-        }
-
         .font-mono {
             font-family: 'JetBrains Mono', monospace;
-        }
-
-        /* Modal */
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.7);
-            backdrop-filter: blur(8px);
-            z-index: 1000;
-            justify-content: center;
-            align-items: center;
-        }
-
-        .modal-overlay.active {
-            display: flex;
-        }
-
-        .modal {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 32px;
-            max-width: 440px;
-            width: 90%;
-            text-align: center;
-        }
-
-        .modal h3 {
-            color: var(--danger-color);
-            margin-bottom: 16px;
-            font-size: 1.3rem;
-        }
-
-        .modal p {
-            color: var(--text-muted);
-            margin-bottom: 24px;
-            font-size: 0.9rem;
-        }
-
-        .modal-actions {
-            display: flex;
-            gap: 12px;
-            justify-content: center;
+            font-weight: 500;
         }
 
         /* Micro-animations */
-        @keyframes fadeIn {
-            from {
-                opacity: 0;
-                transform: translateY(8px);
-            }
-
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
-        .card,
-        header,
-        .dashboard-grid {
-            animation: fadeIn 0.4s ease forwards;
-        }
+        .card { animation: slideUp 0.5s cubic-bezier(0.4, 0, 0.2, 1) calc(var(--i, 0) * 0.1s) both; }
 
         /* Responsive */
         @media (max-width: 768px) {
-            body {
-                padding: 12px;
-            }
-
-            header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-
-            nav {
-                width: 100%;
-                overflow-x: auto;
-            }
-
-            .dashboard-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .card {
-                grid-column: span 1 !important;
-            }
-
-            h1 {
-                font-size: 1.25rem;
-            }
+            body { padding: 12px; }
+            header { flex-direction: column; align-items: flex-start; }
+            nav { width: 100%; overflow-x: auto; }
+            .dashboard-grid { grid-template-columns: 1fr; }
+            .card { grid-column: span 1 !important; }
+            h1 { font-size: 1.25rem; }
         }
     </style>
 </head>
 
 <body>
     <div class="container">
+        <header>
+            <div class="header-left">
+                <h1><i data-lucide="zap"></i> Command Center</h1>
+                {% if paper_trading %}
+                <span class="status-badge status-inactive">
+                    <i data-lucide="test-tube"></i> PAPER MODE
+                </span>
+                {% endif %}
+            </div>
+            <nav>
+                <a href="/dashboard" class="{{ 'active' if request.url.path == '/dashboard' else '' }}">
+                    <i data-lucide="layout-dashboard"></i> Dashboard
+                </a>
+                <a href="/config" class="{{ 'active' if request.url.path == '/config' else '' }}">
+                    <i data-lucide="settings"></i> Config
+                </a>
+                <a href="/backtest" class="{{ 'active' if request.url.path == '/backtest' else '' }}">
+                    <i data-lucide="history"></i> Backtest
+                </a>
+                <a href="/export" class="{{ 'active' if request.url.path == '/export' else '' }}">
+                    <i data-lucide="download"></i> Export
+                </a>
+                <div class="nav-divider"></div>
+                {% if user %}
+                <span class="user-badge">
+                    <i data-lucide="{{ 'shield-check' if user.totp_enabled else 'user' }}"></i>
+                    {{ user.username }}
+                </span>
+                {% endif %}
+                <a href="/auth/logout" class="btn btn-sm btn-outline">
+                    <i data-lucide="log-out"></i> Logout
+                </a>
+                <button class="btn btn-sm btn-kill" onclick="showKillModal()">
+                    <i data-lucide="alert-octagon"></i> KILL
+                </button>
+            </nav>
+        </header>
+
         {% block content %}{% endblock %}
     </div>
 
     <!-- Kill Switch Confirmation Modal -->
     <div id="kill-modal" class="modal-overlay">
+        <!-- Re-adding modal styles if necessary, but they should be in CSS above. 
+             Wait, I didn't include modal-overlay/modal in the CSS! -->
         <div class="modal">
             <h3>🚨 EMERGENCY KILL SWITCH</h3>
-            <p>This will <strong>immediately cancel ALL open orders</strong> and stop the trading engine. This action
-                cannot be undone.</p>
+            <p>This will <strong>immediately cancel ALL open orders</strong> and stop the trading engine. This action cannot be undone.</p>
             <div class="modal-actions">
-                <button class="btn btn-outline"
-                    onclick="document.getElementById('kill-modal').classList.remove('active')">Cancel</button>
+                <button class="btn btn-outline" onclick="document.getElementById('kill-modal').classList.remove('active')">Cancel</button>
                 <button class="btn btn-kill" id="kill-confirm-btn" onclick="executeKillSwitch()">⚡ CONFIRM KILL</button>
             </div>
         </div>
     </div>
 
+    <!-- Modal Style Fix -->
+    <style>
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(12px);
+            z-index: 2000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: var(--card-bg);
+            border: var(--glass-border);
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 480px;
+            width: 90%;
+            text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+        .modal h3 { color: var(--danger-color); margin-bottom: 20px; font-size: 1.5rem; }
+        .modal p { color: var(--text-muted); margin-bottom: 30px; }
+        .modal-actions { display: flex; gap: 16px; justify-content: center; }
+    </style>
+
     <script>
+        // Init Lucide Icons
+        lucide.createIcons();
+
+        // HTMX CSRF Configuration
+        document.body.addEventListener('configRequest.htmx', (event) => {
+            const token = getCookie('csrf_token');
+            if (token) {
+                event.detail.headers['X-CSRF-Token'] = token;
+            }
+        });
+
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        }
+
         function showKillModal() {
             document.getElementById('kill-modal').classList.add('active');
         }
+
         async function executeKillSwitch() {
             const btn = document.getElementById('kill-confirm-btn');
-            btn.textContent = '⏳ Killing...';
+            btn.innerHTML = '<i data-lucide="loader-2" class="animate-spin"></i> Killing...';
+            lucide.createIcons();
             btn.disabled = true;
             try {
-                const resp = await fetch('/api/emergency/kill', { method: 'POST' });
+                const resp = await fetch('/api/emergency/kill', { 
+                    method: 'POST',
+                    headers: { 'X-CSRF-Token': getCookie('csrf_token') }
+                });
                 const data = await resp.json();
                 alert('Kill switch activated: ' + data.message);
             } catch (e) {
                 alert('Kill switch error: ' + e.message);
             }
             document.getElementById('kill-modal').classList.remove('active');
-            btn.textContent = '⚡ CONFIRM KILL';
+            btn.innerHTML = '⚡ CONFIRM KILL';
             btn.disabled = false;
             location.reload();
         }
@@ -448,5 +471,4 @@
         }
     </script>
 </body>
-
 </html>
