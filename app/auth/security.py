@@ -29,14 +29,17 @@ COOKIE_NAME = "thumber_access_token"
 CSRF_COOKIE_NAME = "thumber_csrf_token"
 
 # --- Password Hashing ---
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Use pbkdf2_sha256 because it's robust and avoids bcrypt's 72-byte limit and compatibility issues in some environments.
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 
 def hash_password(password: str) -> str:
+    """Hash a password using PBKDF2 with SHA-256."""
     return pwd_context.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password against its PBKDF2 hash."""
     return pwd_context.verify(plain_password, hashed_password)
 
 

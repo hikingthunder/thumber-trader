@@ -31,11 +31,13 @@ def _client_ip(request: Request) -> str:
 @auth_router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     """Render the login page."""
+    csrf_token = request.cookies.get(CSRF_COOKIE_NAME) or generate_csrf_token()
     return templates.TemplateResponse("login.html", {
         "request": request,
         "error": None,
         "show_totp": False,
-        "show_register": False
+        "show_register": False,
+        "csrf_token": csrf_token
     })
 
 
@@ -60,7 +62,8 @@ async def login(
             "request": request,
             "error": "Invalid username or password",
             "show_totp": False,
-            "show_register": False
+            "show_register": False,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
         }, status_code=401)
 
     if not user.is_active:
@@ -68,7 +71,8 @@ async def login(
             "request": request,
             "error": "Account is deactivated",
             "show_totp": False,
-            "show_register": False
+            "show_register": False,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
         }, status_code=403)
 
     # Check TOTP if enabled
@@ -135,11 +139,13 @@ async def register_page(request: Request):
             "show_register": False
         })
 
+    csrf_token = request.cookies.get(CSRF_COOKIE_NAME) or generate_csrf_token()
     return templates.TemplateResponse("login.html", {
         "request": request,
         "error": None,
         "show_totp": False,
-        "show_register": True
+        "show_register": True,
+        "csrf_token": csrf_token
     })
 
 
@@ -165,7 +171,8 @@ async def register(
             "request": request,
             "error": "Passwords do not match",
             "show_totp": False,
-            "show_register": True
+            "show_register": True,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
         }, status_code=400)
 
     if len(password) < 8:
@@ -173,7 +180,8 @@ async def register(
             "request": request,
             "error": "Password must be at least 8 characters",
             "show_totp": False,
-            "show_register": True
+            "show_register": True,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
         }, status_code=400)
 
     async with AsyncSessionLocal() as session:

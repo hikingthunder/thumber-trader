@@ -7,6 +7,7 @@ from typing import Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.datastructures import MutableHeaders
 from sqlalchemy import select
 
 from app.database.db import AsyncSessionLocal
@@ -153,56 +154,107 @@ class SessionTimeoutMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-class CSRFMiddleware(BaseHTTPMiddleware):
+class CSRFMiddleware:
     """
-    Stateful CSRF protection.
+    Standard ASGI middleware for CSRF protection.
     Ensures that state-changing requests (POST, PUT, DELETE, PATCH)
     contain a token that matches the one stored in a cookie.
+    
+    This implementation avoids the body-consumption issue of BaseHTTPMiddleware
+    by manually handling the receive stream when form data validation is required.
     """
 
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
     # Paths that don't need CSRF (API, webhooks, or explicit bypass)
     EXEMPT_PATHS = {"/api/", "/ws/", "/webhook/"}
 
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+
         # 1. Skip validation for safe methods
         if request.method in self.SAFE_METHODS:
-            response = await call_next(request)
+            async def send_wrapper(message):
+                if message["type"] == "http.response.start":
+                    # Check if cookie exists in request
+                    if not request.cookies.get(CSRF_COOKIE_NAME):
+                        from app.auth.security import generate_csrf_token
+                        from starlette.datastructures import MutableHeaders
+                        headers = MutableHeaders(scope=message)
+                        # We can't easily use response.set_cookie here because we're at ASGI level
+                        # but we can add the Set-Cookie header manually
+                        cookie_val = f"{CSRF_COOKIE_NAME}={generate_csrf_token()}; Path=/; SameSite=lax"
+                        headers.append("Set-Cookie", cookie_val)
+                await send(message)
             
-            # Ensure CSRF cookie is present
-            if not request.cookies.get(CSRF_COOKIE_NAME):
-                from app.auth.security import generate_csrf_token
-                response.set_cookie(
-                    CSRF_COOKIE_NAME,
-                    generate_csrf_token(),
-                    httponly=False,  # Accessible by frontend JS if needed
-                    samesite="lax",
-                    secure=False  # Should be True in production with HTTPS
-                )
-            return response
+            await self.app(scope, receive, send_wrapper)
+            return
 
         # 2. Check for exemptions
         if any(request.url.path.startswith(p) for p in self.EXEMPT_PATHS):
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         # 3. Validate Token
         cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
         if not cookie_token:
             logger.warning(f"CSRF failure: Missing cookie for {request.url.path}")
-            return JSONResponse({"detail": "CSRF cookie missing"}, status_code=403)
+            response = JSONResponse({"detail": "CSRF cookie missing"}, status_code=403)
+            await response(scope, receive, send)
+            return
 
-        # Check header first, then form data
+        # Handle body consumption for token validation
         submitted_token = request.headers.get("X-CSRF-Token")
+        
         if not submitted_token:
-            try:
-                # We need to swallow exceptions as not all POSTs are forms
-                form = await request.form()
-                submitted_token = form.get("csrf_token")
-            except Exception:
-                pass
+            # We need to peek at the body if it's a form
+            content_type = request.headers.get("Content-Type", "")
+            if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+                # Capture the body
+                body_chunks = []
+                async def wrapped_receive():
+                    if body_chunks:
+                        return body_chunks.pop(0)
+                    return await receive()
+
+                # Read the body to parse form (this is the tricky part in ASGI)
+                # For simplicity and to avoid complex stream management, 
+                # we'll use a more robust approach: capture all chunks, parse, then re-emit.
+                entire_body = b""
+                more_body = True
+                while more_body:
+                    message = await receive()
+                    entire_body += message.get("body", b"")
+                    more_body = message.get("more_body", False)
+                    body_chunks.append(message)
+
+                # Now we have the body, we can try to parse the token
+                try:
+                    # Temporary request to parse form from captured body
+                    temp_scope = scope.copy()
+                    async def temp_receive():
+                        return {"type": "http.request", "body": entire_body, "more_body": False}
+                    
+                    temp_request = Request(temp_scope, temp_receive)
+                    form = await temp_request.form()
+                    submitted_token = form.get("csrf_token")
+                except Exception as e:
+                    logger.debug(f"Form parsing failed during CSRF check: {e}")
+
+                # Use the wrapped receive for the rest of the application
+                receive = wrapped_receive
 
         if not submitted_token or submitted_token != cookie_token:
             logger.warning(f"CSRF failure: Invalid token for {request.url.path}")
-            return JSONResponse({"detail": "CSRF token invalid or missing"}, status_code=403)
+            response = JSONResponse({"detail": "CSRF token invalid or missing"}, status_code=403)
+            await response(scope, receive, send)
+            return
 
-        return await call_next(request)
+        # Continue with (potentially wrapped) receive
+        await self.app(scope, receive, send)
