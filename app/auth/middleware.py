@@ -151,3 +151,58 @@ class SessionTimeoutMiddleware(BaseHTTPMiddleware):
                     return response
 
         return await call_next(request)
+
+
+class CSRFMiddleware(BaseHTTPMiddleware):
+    """
+    Stateful CSRF protection.
+    Ensures that state-changing requests (POST, PUT, DELETE, PATCH)
+    contain a token that matches the one stored in a cookie.
+    """
+
+    SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+    # Paths that don't need CSRF (API, webhooks, or explicit bypass)
+    EXEMPT_PATHS = {"/api/", "/ws/", "/webhook/"}
+
+    async def dispatch(self, request: Request, call_next):
+        # 1. Skip validation for safe methods
+        if request.method in self.SAFE_METHODS:
+            response = await call_next(request)
+            
+            # Ensure CSRF cookie is present
+            if not request.cookies.get(CSRF_COOKIE_NAME):
+                from app.auth.security import generate_csrf_token
+                response.set_cookie(
+                    CSRF_COOKIE_NAME,
+                    generate_csrf_token(),
+                    httponly=False,  # Accessible by frontend JS if needed
+                    samesite="lax",
+                    secure=False  # Should be True in production with HTTPS
+                )
+            return response
+
+        # 2. Check for exemptions
+        if any(request.url.path.startswith(p) for p in self.EXEMPT_PATHS):
+            return await call_next(request)
+
+        # 3. Validate Token
+        cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+        if not cookie_token:
+            logger.warning(f"CSRF failure: Missing cookie for {request.url.path}")
+            return JSONResponse({"detail": "CSRF cookie missing"}, status_code=403)
+
+        # Check header first, then form data
+        submitted_token = request.headers.get("X-CSRF-Token")
+        if not submitted_token:
+            try:
+                # We need to swallow exceptions as not all POSTs are forms
+                form = await request.form()
+                submitted_token = form.get("csrf_token")
+            except Exception:
+                pass
+
+        if not submitted_token or submitted_token != cookie_token:
+            logger.warning(f"CSRF failure: Invalid token for {request.url.path}")
+            return JSONResponse({"detail": "CSRF token invalid or missing"}, status_code=403)
+
+        return await call_next(request)
