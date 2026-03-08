@@ -254,11 +254,12 @@ async def emergency_kill(request: Request, user=Depends(get_current_user)):
                     except Exception as e:
                         errors.append(f"Failed to cancel orders for {pid}: {e}")
     except Exception as e:
-        errors.append(f"Kill switch error: {e}")
+        logger.error(f"Kill switch error: {e}", exc_info=True)
+        errors.append("Internal system error during kill switch activation.")
 
     from app.utils.notifications import notify
     await notify(f"🚨 **EMERGENCY KILL SWITCH ACTIVATED** by {user.username}\n"
-                 f"Cancelled {cancelled} orders. Errors: {len(errors)}", force=True)
+                 f"Cancelled {cancelled} orders.", force=True)
 
     return {
         "status": "killed",
@@ -312,7 +313,8 @@ async def test_notifications(request: Request, user=Depends(get_current_user)):
         await notify(msg, force=True)
         return """<span style="color: #10b981;">✅ Test sent! Check your Telegram/Discord.</span>"""
     except Exception as e:
-        return f"""<span style="color: #ef4444;">❌ Failed: {str(e)}</span>"""
+        logger.error(f"Notification test failed: {e}", exc_info=True)
+        return """<span style="color: #ef4444;">❌ Failed: Notification service unavailable or misconfigured.</span>"""
 
 
 # --- Export ---

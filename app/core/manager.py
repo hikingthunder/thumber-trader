@@ -111,9 +111,25 @@ class StrategyManager:
         for strategy in self.strategies.values():
             strategy.stop()
         
-        # Wait for tasks to finish
+        # Stop WebSocket Client
+        if self.ws_client:
+            await self.ws_client.stop()
+            logger.info("WebSocket client stopped.")
+
+        # Wait for tasks to finish (with timeout)
         if self.tasks:
-            await asyncio.gather(*self.tasks, return_exceptions=True)
+            # Filter for tasks that aren't already done
+            active_tasks = [t for t in self.tasks if not t.done()]
+            if active_tasks:
+                logger.info(f"Waiting for {len(active_tasks)} background tasks to exit...")
+                # Use wait for a controlled shutdown timeout
+                done, pending = await asyncio.wait(active_tasks, timeout=5.0)
+                
+                if pending:
+                    logger.warning(f"{len(pending)} tasks failed to exit within 5s, cancelling them.")
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
             self.tasks = []
         
         logger.info("All strategies stopped.")

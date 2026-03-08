@@ -327,7 +327,9 @@
         toast.style.background = 'var(--grad-primary)';
         toast.style.padding = '12px 20px';
         toast.style.animation = 'fadeIn 0.3s ease-out';
-        toast.innerHTML = `<strong>✅ FILL: ${data.side} ${data.size} @ ${data.price}</strong>`;
+        const strong = document.createElement('strong');
+        strong.textContent = `✅ FILL: ${data.side} ${data.size} @ ${data.price}`;
+        toast.appendChild(strong);
         document.body.appendChild(toast);
         setTimeout(() => toast.remove(), 5000);
     }
