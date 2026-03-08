@@ -1,4 +1,4 @@
-
+import logging
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -18,6 +18,7 @@ import psutil
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/web/templates")
+logger = logging.getLogger(__name__)
 
 
 # --- Helper ---
@@ -252,7 +253,8 @@ async def emergency_kill(request: Request, user=Depends(get_current_user)):
                         await manager.exchange.cancel_orders(order_ids)
                         cancelled += len(order_ids)
                     except Exception as e:
-                        errors.append(f"Failed to cancel orders for {pid}: {e}")
+                        logger.error(f"Failed to cancel orders for {pid}: {e}")
+                        errors.append(f"Failed to cancel orders for {pid}")
     except Exception as e:
         logger.error(f"Kill switch error: {e}", exc_info=True)
         errors.append("Internal system error during kill switch activation.")
