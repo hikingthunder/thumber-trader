@@ -73,6 +73,26 @@ async def test_balance_parsing():
         print(f"Test 3 (Flat structure): {balances}")
         assert balances.get("SOL") == Decimal("42.0")
 
+        # 4. Test with list response + nested currency object + only total balance
+        class MockCurrency:
+            def __init__(self, code):
+                self.code = code
+
+        class MockBalanceObj:
+            def __init__(self, value):
+                self.value = value
+
+        class MockAccountV2:
+            def __init__(self, code, value):
+                self.currency = MockCurrency(code)
+                self.balance = MockBalanceObj(value)
+                self.available_balance = None
+
+        exchange.client.get_accounts = MagicMock(return_value=[MockAccountV2("BTC", "0.50")])
+        balances = await exchange.get_account_balances()
+        print(f"Test 4 (List/object V2 structure): {balances}")
+        assert balances.get("BTC") == Decimal("0.50")
+
     print("\nAll balance parsing tests passed!")
 
 if __name__ == "__main__":

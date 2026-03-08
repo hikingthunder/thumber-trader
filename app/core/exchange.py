@@ -61,12 +61,20 @@ class CoinbaseExchange:
     async def get_account_balances(self) -> Dict[str, Decimal]:
         try:
             response = await self._run_async(self.client.get_accounts)
-            
-            # The library can return a dict or an object with 'accounts' attribute
+
+            # The SDK response shape has changed across versions:
+            # - dict with {"accounts": [...]}
+            # - object with .accounts
+            # - raw list of account objects
             if isinstance(response, dict):
-                accounts = response.get("accounts", [])
+                accounts = response.get("accounts", response.get("data", []))
+            elif isinstance(response, list):
+                accounts = response
             else:
                 accounts = getattr(response, "accounts", [])
+
+            if not isinstance(accounts, list):
+                accounts = []
             
             logging.info(f"Exchange found {len(accounts)} accounts")
             
@@ -79,13 +87,22 @@ class CoinbaseExchange:
                     return getattr(obj, key, default)
 
                 currency = get_v(account, "currency")
-                
-                # Available balance can be a nested object or a flat string/number
+                if isinstance(currency, dict):
+                    currency = currency.get("currency") or currency.get("code")
+                elif currency is not None and not isinstance(currency, (str, int, float, Decimal)):
+                    currency = getattr(currency, "currency", None) or getattr(currency, "code", None)
+
+                # Coinbase may return spendable balance in available_balance (preferred),
+                # or only expose balance in some SDK responses.
                 available_balance = get_v(account, "available_balance")
-                
+                if available_balance is None:
+                    available_balance = get_v(account, "balance")
+
                 available_val = 0
-                if isinstance(available_balance, (dict, object)) and not isinstance(available_balance, (str, int, float, Decimal)):
-                    available_val = get_v(available_balance, "value", 0)
+                if isinstance(available_balance, dict):
+                    available_val = available_balance.get("value", 0)
+                elif available_balance is not None and not isinstance(available_balance, (str, int, float, Decimal)):
+                    available_val = getattr(available_balance, "value", 0)
                 elif available_balance is not None:
                     available_val = available_balance
                 
@@ -270,4 +287,3 @@ class CoinbaseExchange:
         except Exception as e:
             logging.warning(f"Failed to fetch {exchange} price for {symbol}: {e}")
             return None
-
