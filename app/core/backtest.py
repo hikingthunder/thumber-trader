@@ -1,8 +1,11 @@
 import logging
-import csv
-import json
-from decimal import Decimal, ROUND_DOWN
+import asyncio
+import time
+from decimal import Decimal
+from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
+
+from app.core.manager import manager
 from app.core import indicators
 
 logger = logging.getLogger(__name__)
@@ -10,47 +13,54 @@ logger = logging.getLogger(__name__)
 class BacktestEngine:
     def __init__(
         self,
-        initial_balance: Decimal = Decimal("1000"),
-        maker_fee: Decimal = Decimal("0.004"),
-        slippage: Decimal = Decimal("0.0001")
+        product_id: str,
+        start_date: str,
+        end_date: str,
+        initial_capital: float = 1000.0,
+        maker_fee: float = 0.001,
     ):
-        self.initial_balance = initial_balance
-        self.balance = initial_balance
+        self.product_id = product_id
+        self.start_date = start_date
+        self.end_date = end_date
+        self.initial_balance = Decimal(str(initial_capital))
+        self.maker_fee = Decimal(str(maker_fee))
+        
+        self.balance = self.initial_balance
         self.inventory = Decimal("0")
-        self.maker_fee = maker_fee
-        self.slippage = slippage
-        
         self.trades: List[Dict[str, Any]] = []
-        self.pnl_history: List[Decimal] = []
-        
+        self.pnl_history: List[float] = []
         self.active_orders: List[Dict[str, Any]] = []
 
-    def load_candles_from_csv(self, filepath: str) -> List[Tuple[int, Decimal, Decimal, Decimal, Decimal]]:
-        """Load candles from a CSV file (ts, high, low, close, volume)."""
-        candles = []
+    async def run(self):
+        """Fetch data and run the simulation."""
+        # 1. Convert dates to timestamps
         try:
-            with open(filepath, 'r') as f:
-                reader = csv.reader(f)
-                next(reader) # skip header
-                for row in reader:
-                    # ts, high, low, close, volume
-                    candles.append((
-                        int(row[0]),
-                        Decimal(row[1]),
-                        Decimal(row[2]),
-                        Decimal(row[3]),
-                        Decimal(row[4])
-                    ))
+            start_dt = datetime.strptime(self.start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(self.end_date, "%Y-%m-%d")
+            start_ts = int(start_dt.timestamp())
+            end_ts = int(end_dt.timestamp())
         except Exception as e:
-            logger.error(f"Failed to load candles: {e}")
-        return candles
+            logger.error(f"Invalid dates for backtest: {e}")
+            return None
 
-    def run(self, candles: List[Tuple[int, Decimal, Decimal, Decimal, Decimal]], grid_lines: int, band_pct: Decimal, order_notional: Decimal):
-        """Run the backtest simulation."""
+        # 2. Fetch candles from exchange
+        # We'll use 1-hour candles for backtest to cover longer ranges efficiently
+        candles = await manager.exchange.fetch_public_candles(
+            product_id=self.product_id,
+            granularity="ONE_HOUR",
+            limit=300 
+        )
+        
         if not candles:
-            return
-            
-        # Initial grid setup
+            logger.warning(f"No candles found for {self.product_id}")
+            return None
+
+        # 3. Simulation Logic (Grid)
+        from app.config import settings
+        grid_lines = settings.grid_lines
+        band_pct = Decimal(str(settings.grid_band_pct))
+        order_notional = Decimal(str(settings.base_order_notional_usd))
+
         mid_price = candles[0][3]
         upper = mid_price * (1 + band_pct)
         lower = mid_price * (1 - band_pct)
@@ -64,9 +74,8 @@ class BacktestEngine:
                 self.active_orders.append({"side": "BUY", "price": level, "size": order_notional / level, "index": i})
 
         for i in range(1, len(candles)):
-            _ts, high, low, current_price, volume = candles[i]
+            ts, high, low, current_price, volume = candles[i]
             
-            # Check for fills
             filled_orders = []
             for order in self.active_orders:
                 if order["side"] == "BUY" and low <= order["price"]:
@@ -78,9 +87,11 @@ class BacktestEngine:
                 self.active_orders.remove(order)
                 self._handle_fill(order, current_price, grid_levels)
             
-            # Track PnL
-            unrealized_pnl = self.inventory * (current_price - (self.trades[-1]["price"] if self.trades else current_price))
-            self.pnl_history.append(self.balance + (self.inventory * current_price) - self.initial_balance)
+            # Track PnL (Total Equity)
+            equity = self.balance + (self.inventory * current_price)
+            self.pnl_history.append(float(equity - self.initial_balance))
+
+        return self.get_report()
 
     def _handle_fill(self, order: Dict[str, Any], current_price: Decimal, grid_levels: List[Decimal]):
         side = order["side"]
@@ -99,11 +110,11 @@ class BacktestEngine:
             
         self.trades.append({
             "side": side,
-            "price": price,
-            "size": size,
-            "fee": fee,
-            "balance": self.balance,
-            "inventory": self.inventory
+            "price": float(price),
+            "size": float(size),
+            "fee": float(fee),
+            "balance": float(self.balance),
+            "inventory": float(self.inventory)
         })
         
         # Place replacement order
@@ -115,7 +126,7 @@ class BacktestEngine:
             self.active_orders.append({
                 "side": new_side, 
                 "price": new_price, 
-                "size": size, # Simplified
+                "size": size, 
                 "index": new_index
             })
 
@@ -124,11 +135,12 @@ class BacktestEngine:
         if not self.pnl_history:
             return {}
             
-        total_pnl = self.pnl_history[-1]
+        total_pnl = Decimal(str(self.pnl_history[-1]))
         max_drawdown = Decimal("0")
         peak = Decimal("-Infinity")
         
-        for pnl in self.pnl_history:
+        for pnl_val in self.pnl_history:
+            pnl = Decimal(str(pnl_val))
             if pnl > peak:
                 peak = pnl
             drawdown = peak - pnl
@@ -136,9 +148,9 @@ class BacktestEngine:
                 max_drawdown = drawdown
                 
         return {
-            "initial_balance": self.initial_balance,
-            "final_equity": self.initial_balance + total_pnl,
-            "total_pnl": total_pnl,
-            "max_drawdown": max_drawdown,
+            "initial_balance": float(self.initial_balance),
+            "final_equity": float(self.initial_balance + total_pnl),
+            "total_pnl": float(total_pnl),
+            "max_drawdown": float(max_drawdown),
             "trade_count": len(self.trades)
         }

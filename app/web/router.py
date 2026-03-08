@@ -51,13 +51,15 @@ async def get_dashboard(request: Request, user=Depends(get_current_user)):
 @router.get("/config", response_class=HTMLResponse)
 async def get_config(request: Request, user=Depends(get_current_user)):
     """Render the configuration page."""
-    def get_val(v):
-        return v.get_secret_value() if hasattr(v, "get_secret_value") else (v or "")
-    
-    envs = {k: get_val(v) for k, v in settings.dict().items()}
+    # Ensure coinbase_api_key is treated correctly for the password field
+    api_key_val = settings.coinbase_api_key
+    if hasattr(api_key_val, "get_secret_value"):
+        api_key_val = api_key_val.get_secret_value()
+        
     context = {
         "request": request,
-        "envs": envs,
+        "settings": settings,
+        "api_key_val": api_key_val or "",
         "user": user
     }
     return templates.TemplateResponse("config.html", context)
@@ -82,6 +84,7 @@ async def get_backtest(request: Request, user=Depends(get_current_user)):
     """Render the backtesting page."""
     context = {
         "request": request,
+        "settings": settings,
         "user": user
     }
     return templates.TemplateResponse("backtest.html", context)
@@ -92,14 +95,19 @@ async def run_backtest(request: Request, user=Depends(get_current_user)):
     """Execute a backtest."""
     form_data = await request.form()
     engine = BacktestEngine(
-        product_id=form_data.get("product_id", settings.product_id),
+        product_id=form_data.get("product_id", settings.product_ids.split(',')[0]),
         start_date=form_data.get("start_date"),
         end_date=form_data.get("end_date"),
-        initial_capital=float(form_data.get("capital", 10000))
+        initial_capital=float(form_data.get("initial_usd", 1000))
     )
-    result = await engine.run()
+    report = await engine.run()
     log_audit(user.id, "backtest_run", f"Product: {engine.product_id}", _client_ip(request))
-    return templates.TemplateResponse("partials/backtest_results.html", {"request": request, "result": result})
+    return templates.TemplateResponse("partials/backtest_results.html", {
+        "request": request, 
+        "report": report,
+        "trades": engine.trades[-20:], # Show last 20 trades
+        "pnl_history": engine.pnl_history
+    })
 
 
 @router.get("/dashboard/stats", response_class=HTMLResponse)
@@ -109,7 +117,7 @@ async def get_dashboard_stats(request: Request):
     
     # Calculate total fees from all fills
     async with AsyncSessionLocal() as session:
-        fee_stmt = select(func.sum(Fill.fee_usd))
+        fee_stmt = select(func.sum(Fill.fee_paid))
         fee_result = await session.execute(fee_stmt)
         total_fees = float(fee_result.scalar() or 0)
     
@@ -313,9 +321,9 @@ async def control_bot(action: str, request: Request, user=Depends(get_current_us
     """Start or stop the trading engine."""
     success = False
     if action == "start":
-        success = await manager.start_engine()
+        success = await manager.start()
     elif action == "stop":
-        success = await manager.stop_engine()
+        success = await manager.stop()
     
     if success:
         log_audit(user.id, f"bot_{action}", f"Engine {action}ed manually", _client_ip(request))

@@ -118,6 +118,15 @@ async def login(
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         secure=False  # Set to True in production with HTTPS
     )
+    # Set non-HttpOnly copy for WebSocket handshake in some environments
+    response.set_cookie(
+        key="thumber_token_js",
+        value=token,
+        httponly=False,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        secure=False
+    )
     # Set CSRF token
     csrf = generate_csrf_token()
     response.set_cookie(key=CSRF_COOKIE_NAME, value=csrf, samesite="lax", max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60)

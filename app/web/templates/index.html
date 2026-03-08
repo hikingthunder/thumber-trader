@@ -127,7 +127,12 @@
             grid: { vertLines: { color: 'rgba(30, 41, 59, 0.3)' }, horzLines: { color: 'rgba(30, 41, 59, 0.3)' } },
             timeScale: { borderColor: 'rgba(30, 41, 59, 0.5)', timeVisible: true, secondsVisible: false }
         });
-        lineSeries = chart.addLineSeries({ color: '#38bdf8', lineWidth: 2 });
+        lineSeries = chart.addAreaSeries({ 
+            lineColor: '#38bdf8', 
+            topColor: 'rgba(56, 189, 248, 0.3)',
+            bottomColor: 'rgba(56, 189, 248, 0.0)',
+            lineWidth: 2 
+        });
         new ResizeObserver(entries => chart.applyOptions({ width: entries[0].contentRect.width })).observe(chartContainer);
     }
 
@@ -183,26 +188,55 @@
     // --- WebSocket ---
     function connectWS() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const socket = new WebSocket(`${protocol}//${window.location.host}/ws/dashboard`);
+        
+        // Helper to get cookie for WebSocket handshake
+        const getCookie = (name) => {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+            return null;
+        };
+        
+        const token = getCookie('thumber_token_js');
+        const wsUrl = `${protocol}//${window.location.host}/ws/dashboard${token ? `?token=${token}` : ''}`;
+        
+        console.log("Connecting to WebSocket:", wsUrl.split('?')[0]);
+        const socket = new WebSocket(wsUrl);
         
         socket.onopen = () => {
+            console.log("WebSocket connected successfully");
             document.getElementById('ws-status').innerHTML = '<span class="status-indicator status-active" style="width: 8px; height: 8px; display: inline-block;"></span>';
         };
         
         socket.onmessage = (event) => {
             const data = JSON.parse(event.data);
-            if (data.type === 'ticker' && lineSeries) {
+            // console.debug("WS Data:", data.type); // Debugging
+            
+            if (data.type === 'ticker') {
                 lineSeries.update({ time: data.time, value: data.price });
                 document.getElementById('chart-price').textContent = '$' + data.price.toLocaleString();
             }
             if (data.type === 'depth') updateDepth(data);
+            if (data.type === 'health') {
+                document.getElementById('cpu-val').textContent = data.cpu_percent.toFixed(2);
+                document.getElementById('ram-val').textContent = data.ram_percent.toFixed(1) + '%';
+            }
         };
         
-        socket.onclose = () => setTimeout(connectWS, 5000);
+        socket.onerror = (err) => {
+            console.error("WebSocket error:", err);
+            document.getElementById('ws-status').innerHTML = '<span class="status-indicator status-error" style="width: 8px; height: 8px; display: inline-block; background: var(--danger-color); border-radius: 50%;"></span>';
+        };
+
+        socket.onclose = () => {
+            console.log("WebSocket closed, retrying in 5s...");
+            setTimeout(connectWS, 5000);
+        };
     }
 
     function updateDepth(data) {
         const canvas = document.getElementById('depth-canvas');
+        if (!canvas) return; // Ensure canvas exists
         const ctx = canvas.getContext('2d');
         const { width, height } = canvas;
         ctx.clearRect(0, 0, width, height);

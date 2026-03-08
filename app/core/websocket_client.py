@@ -15,11 +15,17 @@ class WSUserClient:
     Coinbase Advanced Trade WebSocket Client.
     Handles 'user' channel for fills and 'ticker' channel for price updates.
     """
-    URL = "wss://advanced-trade-ws.coinbase.com"
+    # For Advanced Trade, the user endpoint can handle all channels if authenticated
+    URL = "wss://advanced-trade-ws-user.coinbase.com"
 
     def __init__(self, api_key: str, api_secret: str):
         self.api_key = api_key
         self.api_secret = api_secret
+        
+        # Ensure private key is properly formatted (newlines)
+        if "-----BEGIN" in self.api_secret and "\\n" in self.api_secret:
+            self.api_secret = self.api_secret.replace("\\n", "\n")
+
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.subscriptions: Set[str] = set()
         self.handlers: Dict[str, List[Callable]] = {
@@ -38,25 +44,25 @@ class WSUserClient:
         if channel in self.handlers:
             self.handlers[channel].append(handler)
 
-    async def subscribe(self, product_ids: List[str], channel: str = "ticker"):
-        self.subscriptions.add(channel)
-        if self.ws and self.ws.open:
-            await self._send_subscription(product_ids, channel)
-
     async def start(self):
         self.running = True
         while self.running:
             try:
+                # Use the user-authenticated endpoint which handles both public and private data
                 async with websockets.connect(self.URL) as ws:
                     self.ws = ws
                     self.retry_count = 0
-                    logger.info("WebSocket connected to Coinbase.")
+                    logger.info(f"WebSocket connected to {self.URL}")
                     
                     # Resubscribe to channels
                     product_ids = settings.product_ids.split(",")
-                    await self._send_subscription(product_ids, "user")
+                    
+                    # Subscribe to public and private channels
+                    # Advanced Trade V3 requires authentication for ALL channels 
+                    # if using a Cloud API Key on the user endpoint.
                     await self._send_subscription(product_ids, "ticker")
-                    await self._send_subscription(product_ids, "level2")
+                    await self._send_subscription(product_ids, "l2_data")
+                    await self._send_subscription(product_ids, "user")
                     
                     async for message in ws:
                         await self._handle_message(message)
@@ -75,29 +81,66 @@ class WSUserClient:
             await self.ws.close()
 
     async def _send_subscription(self, product_ids: List[str], channel: str):
-        timestamp = str(int(time.time()))
-        message = f"{timestamp}{channel}{','.join(product_ids)}"
-        signature = hmac.new(
-            self.api_secret.encode("utf-8"),
-            message.encode("utf-8"),
-            digestmod=hashlib.sha256
-        ).hexdigest()
-
-        subscribe_msg = {
-            "type": "subscribe",
-            "channel": channel,
-            "product_ids": product_ids,
-            "api_key": self.api_key,
-            "timestamp": timestamp,
-            "signature": signature
-        }
-        await self.ws.send(json.dumps(subscribe_msg))
-        logger.info(f"Subscribed to {channel} for {product_ids}")
+        """
+        Send a subscription message.
+        Uses JWT authentication for Cloud API Keys (standard for Adv Trade).
+        """
+        try:
+            from coinbase import jwt_generator
+            # Correct function found via inspection: build_ws_jwt
+            jwt_token = jwt_generator.build_ws_jwt(self.api_key, self.api_secret)
+            
+            subscribe_msg = {
+                "type": "subscribe",
+                "channel": channel,
+                "product_ids": product_ids,
+                "jwt": jwt_token
+            }
+            await self.ws.send(json.dumps(subscribe_msg))
+            logger.info(f"Sent authenticated subscription for {channel} product_ids: {product_ids}")
+        except Exception as e:
+            logger.error(f"Failed to generate JWT for subscription: {e}")
+            # Fallback to HMAC signature for legacy API Keys
+            timestamp = str(int(time.time()))
+            import hmac
+            import hashlib
+            msg = f"{timestamp}{channel}{','.join(product_ids)}"
+            signature = hmac.new(
+                self.api_secret.encode("utf-8"),
+                msg.encode("utf-8"),
+                digestmod=hashlib.sha256
+            ).hexdigest()
+            
+            subscribe_msg = {
+                "type": "subscribe",
+                "channel": channel,
+                "product_ids": product_ids,
+                "api_key": self.api_key,
+                "timestamp": timestamp,
+                "signature": signature
+            }
+            await self.ws.send(json.dumps(subscribe_msg))
+            logger.info(f"Sent Legacy signature subscription for {channel}")
 
     async def _handle_message(self, message: str):
         data = json.loads(message)
+        msg_type = data.get("type")
         channel = data.get("channel")
         
+        if msg_type == "error":
+            logger.error(f"Coinbase WS Error: {data.get('message')} (Reason: {data.get('reason')})")
+            return
+
+        if msg_type == "subscriptions":
+             logger.info(f"Confirmed subscriptions: {data.get('channels')}")
+             return
+
+        # Debug log for throughput (every 100th message or specific channels)
+        if not hasattr(self, "_msg_count"): self._msg_count = 0
+        self._msg_count += 1
+        if self._msg_count % 100 == 0 or channel in ["ticker", "user"]:
+            logger.debug(f"WS Message: channel={channel}, type={msg_type}")
+
         # sequence reconciliation if supported by channel
         sequence = data.get("sequence")
         if sequence and channel:
@@ -125,7 +168,7 @@ class WSUserClient:
                     for handler in self.handlers["ticker"]:
                         await handler(ticker)
         
-        elif channel == "level2":
+        elif channel == "l2_data":
             # Pass full L2 event to handlers
             for handler in self.handlers["l2"]:
                 await handler(data)

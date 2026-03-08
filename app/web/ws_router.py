@@ -62,16 +62,18 @@ async def dashboard_websocket(
         token = websocket.cookies.get(COOKIE_NAME)
         
     if not token:
+        logger.warning("WebSocket connection rejected: No token found in Query or Cookies")
         await websocket.close(code=4001) # Unauthorized
         return
 
     payload = decode_access_token(token)
     if not payload:
+        logger.warning(f"WebSocket connection rejected: Invalid or expired token: {token[:10]}...")
         await websocket.close(code=4001)
         return
 
     username = payload.get("sub")
-    logger.info(f"User {username} connecting to dashboard WebSocket")
+    logger.info(f"User {username} successfully connected to dashboard WebSocket")
 
     # 2. Connect
     await browser_ws_manager.connect(websocket)

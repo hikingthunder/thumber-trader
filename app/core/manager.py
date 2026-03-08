@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Dict, List, Optional
 from decimal import Decimal
 
@@ -99,6 +100,8 @@ class StrategyManager:
         monitor_task = asyncio.create_task(self._monitor_loop(), name="monitor")
         self.tasks.append(monitor_task)
 
+        return True
+
     async def stop(self):
         """Stop all strategies."""
         if not self.running:
@@ -133,6 +136,7 @@ class StrategyManager:
             self.tasks = []
         
         logger.info("All strategies stopped.")
+        return True
 
     async def get_global_stats(self) -> Dict:
         """Return a summary of status for API including balances and PnL."""
@@ -182,18 +186,36 @@ class StrategyManager:
 
     async def _handle_ws_ticker(self, ticker: Dict[str, Any]):
         """Route WS ticker event to strategy and broadcast to browser."""
-        product_id = ticker.get("product_id")
-        if product_id in self.strategies:
-            await self.strategies[product_id].on_ws_ticker(ticker)
-        
-        # Broadcast to dashboard
-        from app.web.ws_router import browser_ws_manager
-        await browser_ws_manager.broadcast({
-            "type": "ticker",
-            "product_id": product_id,
-            "price": float(ticker.get("price", 0)),
-            "time": ticker.get("time")
-        })
+        try:
+            product_id = ticker.get("product_id")
+            if product_id in self.strategies:
+                await self.strategies[product_id].on_ws_ticker(ticker)
+            
+            # Broadcast to dashboard
+            from app.web.ws_router import browser_ws_manager
+            
+            # Convert ISO time to unix timestamp if needed
+            t_val = ticker.get("time")
+            if isinstance(t_val, str):
+                try:
+                    from datetime import datetime
+                    # Handle Z suffix for fromisoformat
+                    iso_str = t_val.replace('Z', '+00:00')
+                    t_val = datetime.fromisoformat(iso_str).timestamp()
+                except Exception as e:
+                    logger.debug(f"Ticker time parse error: {e}")
+                    t_val = time.time()
+            elif not t_val:
+                t_val = time.time()
+
+            await browser_ws_manager.broadcast({
+                "type": "ticker",
+                "product_id": product_id,
+                "price": float(ticker.get("price", 0)),
+                "time": t_val
+            })
+        except Exception as e:
+            logger.error(f"Error in _handle_ws_ticker: {e}")
 
     async def _handle_ws_fill(self, event: Dict[str, Any]):
         """Route WS fill event to strategy and broadcast to browser."""
@@ -203,13 +225,23 @@ class StrategyManager:
             
         # Broadcast to dashboard
         from app.web.ws_router import browser_ws_manager
+        
+        t_val = event.get("created_at")
+        if isinstance(t_val, str):
+            try:
+                from datetime import datetime
+                iso_str = t_val.replace('Z', '+00:00')
+                t_val = datetime.fromisoformat(iso_str).timestamp()
+            except:
+                t_val = time.time()
+
         await browser_ws_manager.broadcast({
             "type": "fill",
             "product_id": product_id,
             "side": event.get("side"),
             "price": float(event.get("price", 0)),
             "size": float(event.get("size", 0)),
-            "time": event.get("created_at")
+            "time": t_val
         })
 
     async def _handle_ws_l2(self, event: Dict[str, Any]):
@@ -246,18 +278,21 @@ class StrategyManager:
         if not bids and not asks:
             return
             
-        density = quant_metrics.get_order_book_density(bids, asks, strategy.last_price)
-        
-        # Also include VPIN
-        vpin_val = analysis.vpin(strategy.candles)
-        
-        from app.web.ws_router import browser_ws_manager
-        await browser_ws_manager.broadcast({
-            "type": "depth",
-            "product_id": product_id,
-            "density": density,
-            "vpin": float(vpin_val)
-        })
+        try:
+            density = quant_metrics.get_order_book_density(bids, asks, strategy.last_price)
+            
+            # Also include VPIN
+            vpin_val = analysis.vpin(strategy.candles)
+            
+            from app.web.ws_router import browser_ws_manager
+            await browser_ws_manager.broadcast({
+                "type": "depth",
+                "product_id": product_id,
+                "density": density,
+                "vpin": float(vpin_val)
+            })
+        except Exception as e:
+            logger.error(f"Error during L2 broadcast: {e}")
 
     async def _monitor_loop(self):
 
