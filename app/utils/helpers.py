@@ -12,10 +12,24 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 SALT = b"thumber-trader-v2-salt-long-string-for-security"
 
 def _get_key_from_env() -> Optional[bytes]:
-    """Derive a 32-byte key from APP_ENV_ENC_KEY."""
+    """Derive a 32-byte key from APP_ENV_ENC_KEY or auto-generate one in .enc_key."""
     key_str = os.getenv("APP_ENV_ENC_KEY")
+    
     if not key_str:
-        return None
+        # Fallback to local .enc_key file
+        enc_file = Path(".enc_key")
+        if enc_file.exists():
+            key_str = enc_file.read_text().strip()
+        else:
+            # Generate a new random 32-byte hex string (64 chars) and save it
+            key_str = os.urandom(32).hex()
+            enc_file.write_text(key_str + "\n")
+            # Set restrictive permissions (rw-------)
+            try:
+                os.chmod(enc_file, 0o600)
+            except Exception:
+                pass
+            logging.info("Generated new local encryption key in .enc_key")
     
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),

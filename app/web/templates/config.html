@@ -177,6 +177,7 @@
         {% endif %}
 
         <form method="post" action="/config">
+            <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
             <!-- API Credentials -->
             <div class="config-section">
                 <h2>🔑 API Credentials</h2>

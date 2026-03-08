@@ -144,7 +144,8 @@ class GridStrategy(StrategyEngine):
                         external_prices.append(p)
                 
                 if external_prices:
-                    avg_external = sum(external_prices) / len(external_prices)
+                    import statistics
+                    avg_external = Decimal(str(statistics.median(external_prices)))
                     # Check deviation
                     deviation = abs(cb_price - avg_external) / avg_external
                     if deviation > settings.consensus_max_deviation_pct:

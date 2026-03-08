@@ -54,8 +54,20 @@ class SmartOrderRouter:
         logger.info(f"SOR: Splitting {side} ${total_notional_usd} into {num_slices} slices of ${slice_notional}")
         
         for i in range(num_slices):
+            # Fetch real-time price for this specific slice to prevent slippage
+            try:
+                slice_price = await self.exchange.get_current_price(product_id)
+                if slice_price <= 0:
+                    logger.warning(f"SOR slice {i+1} got invalid price: {slice_price}. Using last known.")
+                    slice_price = current_price
+                else:
+                    current_price = slice_price # Update last known
+            except Exception as e:
+                logger.warning(f"SOR slice {i+1} price fetch failed: {e}. Using last known.")
+                slice_price = current_price
+
             # Calculate size for this slice
-            size = (slice_notional / current_price).quantize(Decimal("0.00001"), rounding=ROUND_DOWN)
+            size = (slice_notional / slice_price).quantize(Decimal("0.00001"), rounding=ROUND_DOWN)
             
             if size <= 0:
                 continue
@@ -63,11 +75,11 @@ class SmartOrderRouter:
             # Calculate limit price with slippage protection
             if price_limit_pct:
                 if side == "BUY":
-                    limit_price = current_price * (1 + price_limit_pct)
+                    limit_price = slice_price * (1 + price_limit_pct)
                 else:
-                    limit_price = current_price * (1 - price_limit_pct)
+                    limit_price = slice_price * (1 - price_limit_pct)
             else:
-                limit_price = current_price
+                limit_price = slice_price
             
             limit_price = limit_price.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
             

@@ -155,6 +155,7 @@
                     <span>⚙️ Parameters</span>
                 </h2>
                 <form hx-post="/api/backtest/run" hx-target="#backtest-results" hx-indicator=".results-panel">
+                    <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
                     <div class="form-group">
                         <label>Product</label>
                         <input type="text" name="product_id" value="{{ settings.product_id }}">

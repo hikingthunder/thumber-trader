@@ -7,7 +7,7 @@
 **Thumber Trader** is a high-frequency, ultra-adaptive grid trading engine built for the modern crypto market. Evolved from a simple script into a robust **FastAPI ecosystem**, it combines industrial-strength risk management with cutting-edge market analysis to keep you ahead of the spread.
 
 > [!IMPORTANT]
-> **Why Thumber Trader?** Most bots react to the market. Thumber Trader *anticipates* it using order flow toxicity (VPIN) and signal fusion.
+> **Why Thumber Trader?** Most bots react to the market. Thumber Trader *anticipates* it using order flow toxicity (VPIN), signal fusion, and sentiment analysis.
 
 ---
 
@@ -18,9 +18,12 @@
 | **Adaptive Grid** | Arithmetic & Geometric spacing with ATR-adaptive bands. | Maximizes yield in both ranging and trending markets. |
 | **Alpha Fusion** | Real-time RSI + MACD + Order Book Imbalance signals. | Filters noise and avoids "catching the falling knife." |
 | **VPIN Engine** | Detects "Toxic Flow" before a breakout happens. | Automatically halts or widens bands to prevent stop-outs. |
+| **Smart Order Router** | Splits large orders across multiple venues to mitigate slippage. | Institutional-grade execution for large block trades. |
+| **Sentiment Analysis** | Real-time Fear & Greed and news sentiment monitoring. | Employs circuit breakers during unexpected "Black Swan" events. |
+| **Portfolio Rebalancer**| Maintains desired target asset allocations automatically. | Simplifies and automates long-term portfolio management. |
 | **Kelly Criterion** | Mathematical position sizing based on historical performance. | Optimizes capital growth while managing ruin risk. |
 | **Multi-Venue Pricing**| Consolidation from Coinbase, Binance, Kraken, and Bybit. | Ensures accurate execution prices and prevents oracle manipulation. |
-| **High Availability** | Active-Passive failover with database-backed election. | 99.9% uptime for your capital. |
+| **Bank-Grade Security** | Symmetric AES encryption of API keys and strict CSRF protection. | Secures sensitive data at rest and hardens the web dashboard. |
 
 ---
 
@@ -67,7 +70,8 @@ Forget digging through `.env` files. Thumber Trader features a **Premium Configu
 - **Product Management**: Trade BTC, ETH, SOL and more simultaneously.
 - **Toxicity Controls**: Tune VPIN sensitivity and response modes.
 - **Strategy Stacks**: Layer core grid logic with alpha and hedging layers.
-- **Notifications**: Instant alerts via Telegram or Discord Webhooks.
+- **Event Notifications**: Instant, granular alerts via Slack, PagerDuty, Telegram, or Discord.
+- **External Webhooks**: Receive signals from TradingView or custom algorithms to trigger bot actions.
 - **Safe Start**: Execute "Base Buys" with VWAP algorithms to enter positions smoothly.
 
 ---
@@ -83,13 +87,19 @@ Access your command center at `http://localhost:8080`:
 
 ---
 
+## 🧑‍💻 Contributing & Architecture
+
+Thumber Trader delegates responsibilities across specialized agent "roles" for streamlined development. If you're contributing to the logic, frontend, data engineering, secops, or QA, please review the [AGENTS.md](AGENTS.md) file to understand our ownership boundaries.
+
+---
+
 ## ❓ FAQ
 
 **Q: Can I use this for Paper Trading?**  
 A: Yes! Enable `PAPER_TRADING_MODE=True` in the dashboard to test your strategies with zero risk.
 
 **Q: Which API Keys do I need?**  
-A: You need **Coinbase Advanced Trade** keys with `Trade` and `View` permissions.
+A: You need **Coinbase Advanced Trade** keys with `Trade` and `View` permissions. Integrations with Binance and others are ongoing.
 
 **Q: How do I handle Proxmox LXC?**  
 A: Use the Native Linux instructions. Thumber Trader is extremely lightweight and runs perfectly in a 1-core, 512MB RAM Debian LXC.

@@ -169,6 +169,7 @@
         {% if show_register %}
         <!-- Registration Form -->
         <form method="post" action="/auth/register" class="auth-form">
+            <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
             <div class="form-group">
                 <label>Username</label>
                 <input type="text" name="username" placeholder="admin" required autofocus autocomplete="username">
@@ -189,6 +190,7 @@
         {% elif show_totp %}
         <!-- TOTP Verification -->
         <form method="post" action="/auth/login" class="auth-form">
+            <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
             <input type="hidden" name="username" value="{{ username }}">
             <input type="hidden" name="password" value="{{ password }}">
             <div class="totp-section">
@@ -208,6 +210,7 @@
         {% else %}
         <!-- Login Form -->
         <form method="post" action="/auth/login" class="auth-form">
+            <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
             <div class="form-group">
                 <label>Username</label>
                 <input type="text" name="username" placeholder="Enter your username" required autofocus

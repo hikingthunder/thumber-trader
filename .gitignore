@@ -27,7 +27,14 @@ wheels/
 
 # Database
 thumber_trader.db
+grid_state.db
 *.sqlite3
+
+# Runtime Directories
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
 
 # IDEs
 .vscode/

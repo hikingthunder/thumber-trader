@@ -98,6 +98,7 @@
         <div class="secret-key">{{ secret }}</div>
 
         <form method="post" action="/auth/totp-verify" style="margin-top: 20px;">
+            <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
             <input type="hidden" name="secret" value="{{ secret }}">
             <div style="margin-bottom: 16px;">
                 <input type="text" name="code" placeholder="Enter 6-digit code" required autofocus maxlength="6"

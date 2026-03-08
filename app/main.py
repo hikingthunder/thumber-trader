@@ -19,7 +19,7 @@ from app.auth.auth_router import auth_router
 from app.web.ws_router import ws_router
 from app.web.webhook_router import router as webhook_router
 
-from app.auth.middleware import IPWhitelistMiddleware, AuditMiddleware, SessionTimeoutMiddleware
+from app.auth.middleware import IPWhitelistMiddleware, AuditMiddleware, SessionTimeoutMiddleware, CSRFMiddleware
 
 # Setup Logging
 logging.basicConfig(
@@ -91,6 +91,9 @@ app.add_middleware(
 
 # Session timeout (checks JWT expiry)
 app.add_middleware(SessionTimeoutMiddleware)
+
+# CSRF Protection
+app.add_middleware(CSRFMiddleware)
 
 # Audit logging (logs POST/PUT/DELETE)
 app.add_middleware(AuditMiddleware)

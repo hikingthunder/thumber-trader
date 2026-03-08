@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse, Response
 from sqlalchemy import select
 
 from app.database.db import AsyncSessionLocal
+from app.auth.security import CSRF_COOKIE_NAME
 
 logger = logging.getLogger(__name__)
 
