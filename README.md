@@ -135,19 +135,12 @@ Use the Debian/Ubuntu instructions inside your WSL distro.
 
 ---
 
-## Proxmox Debian LXC installer (safer flow)
+## Proxmox Debian LXC one-line installer
 
-From a fresh Debian LXC shell (as root), use a download → inspect → run sequence:
+From a fresh Debian LXC shell (as root):
 
 ```bash
-# 1) Download
-curl -fsSL -o install_lxc.sh https://raw.githubusercontent.com/hikingthunder/thumber-trader/main/scripts/install_lxc.sh
-
-# 2) Inspect (recommended)
-less install_lxc.sh
-
-# 3) Execute
-bash install_lxc.sh
+bash -lc "$(curl -fsSL https://raw.githubusercontent.com/hikingthunder/thumber-trader/main/scripts/install_lxc.sh)"
 ```
 
 What it does:
@@ -190,7 +183,6 @@ podman compose logs -f app
 - added ignores for private keys/certs and secret artifacts
 - keep API keys only in `.env` or external secret manager
 - leave `JWT_SECRET_KEY` empty for ephemeral sessions, or set a long random value for persistent logins
-- set `CORS_ALLOWED_ORIGINS` to an explicit allowlist (avoid `*` in production)
 - rotate credentials after any accidental exposure
 
 ---
