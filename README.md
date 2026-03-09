@@ -148,7 +148,7 @@ What it does:
 - clones/updates repo to `/opt/thumber-trader`
 - creates virtualenv and installs requirements
 - creates `/etc/thumber-trader/thumber-trader.env` if missing
-- installs and enables `thumber-trader.service`
+- installs and enables `thumber-trader.service` (runs as dedicated non-root `thumber` user)
 
 ---
 
@@ -206,6 +206,14 @@ podman compose logs -f app
 git pull --ff-only
 source .venv/bin/activate
 pip install -r requirements.txt
+sudo systemctl restart thumber-trader
+```
+
+If you deployed with `scripts/install_lxc.sh`, update as:
+
+```bash
+sudo -u thumber git -C /opt/thumber-trader pull --ff-only
+sudo -u thumber /opt/thumber-trader/.venv/bin/pip install -r /opt/thumber-trader/requirements.txt
 sudo systemctl restart thumber-trader
 ```
 
