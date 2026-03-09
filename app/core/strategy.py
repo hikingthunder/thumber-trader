@@ -256,6 +256,7 @@ class GridStrategy(StrategyEngine):
                     # Match against existing open tax lots (FIFO)
                     sell_size = Decimal(order["base_size"])
                     sell_price = Decimal(order["price"])
+                    pending_match_rows = []
                     
                     # Fetch open lots based on tax lot method
                     order_by = TaxLot.acquired_ts.asc() # Default FIFO
@@ -292,20 +293,19 @@ class GridStrategy(StrategyEngine):
                         pnl = proceeds - cost_basis
                         total_pnl_for_sell += pnl
                         
-                        # Create match record
-                        match = TaxLotMatch(
-                            sell_fill_id=None, # Will be updated after fill is added
-                            lot_id=lot.id,
-                            matched_base_size=str(match_size),
-                            buy_price=lot.buy_price,
-                            sell_price=str(sell_price),
-                            proceeds_usd=str(proceeds),
-                            cost_basis_usd=str(cost_basis),
-                            realized_pnl_usd=str(pnl),
-                            acquired_ts=lot.acquired_ts,
-                            created_ts=time.time()
+                        pending_match_rows.append(
+                            {
+                                "lot_id": lot.id,
+                                "matched_base_size": str(match_size),
+                                "buy_price": lot.buy_price,
+                                "sell_price": str(sell_price),
+                                "proceeds_usd": str(proceeds),
+                                "cost_basis_usd": str(cost_basis),
+                                "realized_pnl_usd": str(pnl),
+                                "acquired_ts": lot.acquired_ts,
+                                "created_ts": time.time(),
+                            }
                         )
-                        session.add(match)
                         
                         sell_size -= match_size
                     
@@ -336,9 +336,21 @@ class GridStrategy(StrategyEngine):
                     if 'new_lot' in locals(): # Check if new_lot was created
                         new_lot.buy_fill_id = new_fill.id
                 elif order["side"] == "SELL":
-                    for match_obj in session.new:
-                        if isinstance(match_obj, TaxLotMatch):
-                            match_obj.sell_fill_id = new_fill.id
+                    for match_data in pending_match_rows:
+                        session.add(
+                            TaxLotMatch(
+                                sell_fill_id=new_fill.id,
+                                lot_id=match_data["lot_id"],
+                                matched_base_size=match_data["matched_base_size"],
+                                buy_price=match_data["buy_price"],
+                                sell_price=match_data["sell_price"],
+                                proceeds_usd=match_data["proceeds_usd"],
+                                cost_basis_usd=match_data["cost_basis_usd"],
+                                realized_pnl_usd=match_data["realized_pnl_usd"],
+                                acquired_ts=match_data["acquired_ts"],
+                                created_ts=match_data["created_ts"],
+                            )
+                        )
 
                 # Remove from Orders table
                 await session.delete(db_order)
