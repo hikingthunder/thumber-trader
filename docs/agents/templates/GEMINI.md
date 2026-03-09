@@ -32,3 +32,8 @@ Use this file to brief Gemini-based contributors on repository expectations.
 - [ ] README / .env.example updated when config changes
 - [ ] No secrets introduced
 - [ ] Handoff note included when cross-domain
+
+## Release enhancement parity
+- Align task proposals and implementation sequencing with `docs/release_enhancement_plan.md`.
+- When adding one of the roadmap features, include explicit handoff notes for next owner (Core → Frontend → Data → QA → SecOps as applicable).
+- Keep README references in sync when roadmap items are added, removed, or re-prioritized.

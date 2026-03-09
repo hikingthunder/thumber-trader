@@ -153,3 +153,10 @@ Feature: “Add new signal + expose UI toggle + persist state + test coverage”
 - Do not commit `.env`, keys, tokens, private certs, or production dumps.
 - Sanitize screenshots/log snippets before sharing.
 - Treat webhook secrets and JWT keys as sensitive.
+
+
+## Release roadmap reference
+
+- Track staged implementation priorities in `docs/release_enhancement_plan.md`.
+- If feature priority changes, update that roadmap and keep `README.md` + agent templates in `docs/agents/templates/` in parity.
+

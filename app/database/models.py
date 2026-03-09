@@ -92,6 +92,19 @@ class DailyStats(Base):
     shap_macd: Mapped[str] = mapped_column(String, default="0")
     shap_book_imbalance: Mapped[str] = mapped_column(String, default="0")
 
+
+class ConfigVersion(Base):
+    __tablename__ = "config_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_ts: Mapped[float] = mapped_column(Float, nullable=False)
+    actor_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    actor_username: Mapped[str] = mapped_column(String, nullable=False)
+    change_summary: Mapped[str] = mapped_column(String, nullable=False)
+    changed_keys: Mapped[str] = mapped_column(Text, nullable=False)
+    env_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    rollback_from_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
 class StateMeta(Base):
     __tablename__ = "state_meta"
     
