@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="/opt/thumber-trader"
+ENV_FILE="/etc/thumber-trader/thumber-trader.env"
+SERVICE_FILE="/etc/systemd/system/thumber-trader.service"
+REPO_URL="https://github.com/hikingthunder/thumber-trader.git"
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y git curl ca-certificates python3 python3-venv python3-pip
+
+if [[ ! -d "$APP_DIR/.git" ]]; then
+  git clone "$REPO_URL" "$APP_DIR"
+else
+  git -C "$APP_DIR" pull --ff-only
+fi
+
+python3 -m venv "$APP_DIR/.venv"
+"$APP_DIR/.venv/bin/pip" install --upgrade pip
+"$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+
+mkdir -p /etc/thumber-trader
+if [[ ! -f "$ENV_FILE" ]]; then
+  cp "$APP_DIR/.env.example" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+fi
+
+cat > "$SERVICE_FILE" <<UNIT
+[Unit]
+Description=Thumber Trader FastAPI Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$APP_DIR
+EnvironmentFile=$ENV_FILE
+ExecStart=$APP_DIR/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now thumber-trader.service
+systemctl --no-pager status thumber-trader.service || true
+
+echo "Install complete. Edit $ENV_FILE, then: systemctl restart thumber-trader"
