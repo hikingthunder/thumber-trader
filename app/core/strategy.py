@@ -337,20 +337,7 @@ class GridStrategy(StrategyEngine):
                         new_lot.buy_fill_id = new_fill.id
                 elif order["side"] == "SELL":
                     for match_data in pending_match_rows:
-                        session.add(
-                            TaxLotMatch(
-                                sell_fill_id=new_fill.id,
-                                lot_id=match_data["lot_id"],
-                                matched_base_size=match_data["matched_base_size"],
-                                buy_price=match_data["buy_price"],
-                                sell_price=match_data["sell_price"],
-                                proceeds_usd=match_data["proceeds_usd"],
-                                cost_basis_usd=match_data["cost_basis_usd"],
-                                realized_pnl_usd=match_data["realized_pnl_usd"],
-                                acquired_ts=match_data["acquired_ts"],
-                                created_ts=match_data["created_ts"],
-                            )
-                        )
+                        session.add(TaxLotMatch(sell_fill_id=new_fill.id, **match_data))
 
                 # Remove from Orders table
                 await session.delete(db_order)
