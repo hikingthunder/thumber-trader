@@ -2,12 +2,19 @@
 set -euo pipefail
 
 APP_DIR="/opt/thumber-trader"
+DATA_DIR="/var/lib/thumber-trader"
+DB_FILE="$DATA_DIR/thumber_trader.db"
 ENV_DIR="/etc/thumber-trader"
 ENV_FILE="$ENV_DIR/thumber-trader.env"
 SERVICE_FILE="/etc/systemd/system/thumber-trader.service"
 REPO_URL="https://github.com/hikingthunder/thumber-trader.git"
 APP_USER="thumber"
 APP_GROUP="thumber"
+
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  echo "This installer must be run as root." >&2
+  exit 1
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -32,11 +39,20 @@ python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
 mkdir -p "$ENV_DIR"
+mkdir -p "$DATA_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then
   cp "$APP_DIR/.env.example" "$ENV_FILE"
 fi
 
-chown -R "$APP_USER:$APP_GROUP" "$APP_DIR"
+if grep -q '^STATE_DB_PATH=' "$ENV_FILE"; then
+  sed -i "s|^STATE_DB_PATH=.*|STATE_DB_PATH=\"$DB_FILE\"|" "$ENV_FILE"
+else
+  echo "STATE_DB_PATH=\"$DB_FILE\"" >> "$ENV_FILE"
+fi
+
+chown -R root:root "$APP_DIR"
+chown "$APP_USER:$APP_GROUP" "$DATA_DIR"
+chmod 750 "$DATA_DIR"
 chown root:"$APP_GROUP" "$ENV_FILE"
 chmod 640 "$ENV_FILE"
 
