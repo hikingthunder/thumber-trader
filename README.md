@@ -182,6 +182,7 @@ podman compose logs -f app
 - DB and runtime dirs are gitignored
 - added ignores for private keys/certs and secret artifacts
 - keep API keys only in `.env` or external secret manager
+- leave `JWT_SECRET_KEY` empty for ephemeral sessions, or set a long random value for persistent logins
 - rotate credentials after any accidental exposure
 
 ---
