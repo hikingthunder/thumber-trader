@@ -43,3 +43,14 @@ logs/*
 # OS
 .DS_Store
 Thumbs.db
+
+# Sensitive artifacts
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets.*
+*.secrets
+.env.*
+!.env.example

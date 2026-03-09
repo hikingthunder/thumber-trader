@@ -1,115 +1,249 @@
-# ⚡ Thumber Trader v2.0: The Institutional-Grade Grid Bot
+# Thumber Trader v2.0
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com)
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+Institutional-style grid trading bot with FastAPI dashboard, strategy controls, risk guardrails, and paper/live execution modes.
 
-**Thumber Trader** is a high-frequency, ultra-adaptive grid trading engine built for the modern crypto market. Evolved from a simple script into a robust **FastAPI ecosystem**, it combines industrial-strength risk management with cutting-edge market analysis to keep you ahead of the spread.
+## What this project includes
 
-> [!IMPORTANT]
-> **Why Thumber Trader?** Most bots react to the market. Thumber Trader *anticipates* it using order flow toxicity (VPIN), signal fusion, and sentiment analysis.
-
----
-
-## 🔥 Key Competitive Edge
-
-| Feature | Description | Benefit |
-|---------|-------------|---------|
-| **Adaptive Grid** | Arithmetic & Geometric spacing with ATR-adaptive bands. | Maximizes yield in both ranging and trending markets. |
-| **Alpha Fusion** | Real-time RSI + MACD + Order Book Imbalance signals. | Filters noise and avoids "catching the falling knife." |
-| **VPIN Engine** | Detects "Toxic Flow" before a breakout happens. | Automatically halts or widens bands to prevent stop-outs. |
-| **Smart Order Router** | Splits large orders across multiple venues to mitigate slippage. | Institutional-grade execution for large block trades. |
-| **Sentiment Analysis** | Real-time Fear & Greed and news sentiment monitoring. | Employs circuit breakers during unexpected "Black Swan" events. |
-| **Portfolio Rebalancer**| Maintains desired target asset allocations automatically. | Simplifies and automates long-term portfolio management. |
-| **Kelly Criterion** | Mathematical position sizing based on historical performance. | Optimizes capital growth while managing ruin risk. |
-| **Multi-Venue Pricing**| Consolidation from Coinbase, Binance, Kraken, and Bybit. | Ensures accurate execution prices and prevents oracle manipulation. |
-| **Bank-Grade Security** | Symmetric AES encryption of API keys and strict CSRF protection. | Secures sensitive data at rest and hardens the web dashboard. |
+- Adaptive grid engine (`arithmetic` or `geometric` spacing)
+- Alpha fusion controls (RSI, MACD, imbalance weighting)
+- VPIN toxicity controls and risk guardrails
+- Web dashboard with:
+  - auth (register/login/session)
+  - runtime stats and fills widgets
+  - config editor that writes to `.env`
+  - backtest page
+  - export page (CSV/XLSX/ODS)
+- Notifications (Telegram/Discord/Slack/PagerDuty)
+- TradingView webhook endpoint for pause/resume/kill actions
+- Prometheus-style metrics endpoint (`/metrics`)
+- Docker + Compose + Podman workflows
 
 ---
 
-## 🚀 Get Started in 5 Minutes
+## Quick start
 
-### 1. The Container Way (Recommended)
-Perfect for Proxmox, VPS, or Docker-hardened environments.
+### 1) Clone and configure
 
 ```bash
 git clone https://github.com/hikingthunder/thumber-trader.git
 cd thumber-trader
 cp .env.example .env
-# Edit .env with your Coinbase Keys
-docker-compose up -d
+# edit .env with your keys/secrets before live trading
 ```
 
-### 2. Native Linux (Debian/Ubuntu/LXC)
-The choice for performance purists.
+### 2) Run with Docker Compose
 
 ```bash
-# Install dependencies
-sudo apt update && sudo apt install -y python3-venv git curl
-python3 -m venv .venv && source .venv/activate
-pip install -r requirements.txt
+docker compose up -d --build
+```
 
-# Run the engine
+Open: `http://localhost:8080`
+
+### 3) Run with Podman Compose
+
+```bash
+podman compose up -d --build
+```
+
+If your host uses rootless Podman with SELinux, add relabel flags to bind mounts (`:Z`) or use named volumes.
+
+---
+
+## Installation matrix (major OS / platforms)
+
+### Debian / Ubuntu / Proxmox LXC (recommended)
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+cp .env.example .env
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-### 3. Windows (PowerShell)
-```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
+### Fedora / RHEL / Rocky / AlmaLinux
+
+```bash
+sudo dnf install -y git python3 python3-pip
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
+
+### Arch Linux / Manjaro
+
+```bash
+sudo pacman -Sy --needed git python python-pip
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
+
+### openSUSE
+
+```bash
+sudo zypper install -y git python311 python311-pip
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
+
+### macOS (Homebrew)
+
+```bash
+brew install git python
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+cp .env.example .env
 uvicorn app.main:app --host 127.0.0.1 --port 8080
+```
+
+### Windows 10/11 (PowerShell)
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+Copy-Item .env.example .env
+uvicorn app.main:app --host 127.0.0.1 --port 8080
+```
+
+### WSL2
+
+Use the Debian/Ubuntu instructions inside your WSL distro.
+
+### Virtualization targets
+
+- **Proxmox VE VM**: any Linux section above applies
+- **Proxmox LXC (Debian)**: use helper script below
+- **VMware / VirtualBox / KVM**: use distro-native section
+
+---
+
+## Proxmox Debian LXC installer (safer flow)
+
+From a fresh Debian LXC shell (as root), use a download → inspect → run sequence:
+
+```bash
+# 1) Download
+curl -fsSL -o install_lxc.sh https://raw.githubusercontent.com/hikingthunder/thumber-trader/main/scripts/install_lxc.sh
+
+# 2) Inspect (recommended)
+less install_lxc.sh
+
+# 3) Execute
+bash install_lxc.sh
+```
+
+What it does:
+- installs Python + Git + venv tooling
+- clones/updates repo to `/opt/thumber-trader`
+- creates virtualenv and installs requirements
+- creates `/etc/thumber-trader/thumber-trader.env` if missing
+- installs and enables `thumber-trader.service` (runs as dedicated non-root `thumber` user)
+
+---
+
+## Container usage
+
+### Docker
+
+```bash
+docker compose up -d --build
+docker compose logs -f app
+```
+
+### Podman
+
+```bash
+podman compose up -d --build
+podman compose logs -f app
+```
+
+### Notes
+
+- Default app port: `8080`
+- Environment loaded from `.env`
+- Persistent runtime state in `data/` and sqlite DB files
+
+---
+
+## Security hygiene checklist
+
+- `.env` is gitignored
+- DB and runtime dirs are gitignored
+- added ignores for private keys/certs and secret artifacts
+- keep API keys only in `.env` or external secret manager
+- leave `JWT_SECRET_KEY` empty for ephemeral sessions, or set a long random value for persistent logins
+- set `CORS_ALLOWED_ORIGINS` to an explicit allowlist (avoid `*` in production)
+- rotate credentials after any accidental exposure
+
+---
+
+## Core endpoints
+
+- `GET /health` – app + manager state
+- `GET /metrics` – Prometheus text metrics
+- `GET /dashboard` – primary UI
+- `GET/POST /config` – runtime config editor
+- `GET/POST /backtest` – backtesting UI/actions
+- `POST /webhook/tradingview` – TradingView actions (`pause|resume|adjust_band|kill`)
+- `WS /ws/dashboard` – realtime dashboard channel
+
+---
+
+## Updating
+
+### Git-based deployment
+
+```bash
+git pull --ff-only
+source .venv/bin/activate
+pip install -r requirements.txt
+sudo systemctl restart thumber-trader
+```
+
+If you deployed with `scripts/install_lxc.sh`, update as:
+
+```bash
+sudo -u thumber git -C /opt/thumber-trader pull --ff-only
+sudo -u thumber /opt/thumber-trader/.venv/bin/pip install -r /opt/thumber-trader/requirements.txt
+sudo systemctl restart thumber-trader
+```
+
+### Docker / Podman deployment
+
+```bash
+git pull --ff-only
+docker compose up -d --build
+# or
+podman compose up -d --build
 ```
 
 ---
 
-## ⚙️ Advanced Configuration (No Files Needed!)
+## Development roles
 
-Forget digging through `.env` files. Thumber Trader features a **Premium Configuration Dashboard** where you can tune:
-
-- **Product Management**: Trade BTC, ETH, SOL and more simultaneously.
-- **Toxicity Controls**: Tune VPIN sensitivity and response modes.
-- **Strategy Stacks**: Layer core grid logic with alpha and hedging layers.
-- **Event Notifications**: Instant, granular alerts via Slack, PagerDuty, Telegram, or Discord.
-- **External Webhooks**: Receive signals from TradingView or custom algorithms to trigger bot actions.
-- **Safe Start**: Execute "Base Buys" with VWAP algorithms to enter positions smoothly.
+Role ownership and delegation guidance lives in [`AGENTS.md`](AGENTS.md).
+Templates for other AI-agent runtimes live in [`docs/agents/templates/`](docs/agents/templates/).
 
 ---
 
-## 📈 Dashboard & Monitoring
+## Disclaimer
 
-Access your command center at `http://localhost:8080`:
-
-- **Real-time Charting**: Visualize your grid levels against live price action.
-- **PnL Tracking**: Comprehensive daily stats and realized/unrealized metrics.
-- **Tax-Ready Exports**: One-click accounting exports (CSV, XLSX, ODS) with FIFO support.
-- **Prometheus Metrics**: Ready-to-go `/metrics` endpoint for Grafana integration.
-
----
-
-## 🧑‍💻 Contributing & Architecture
-
-Thumber Trader delegates responsibilities across specialized agent "roles" for streamlined development. If you're contributing to the logic, frontend, data engineering, secops, or QA, please review the [AGENTS.md](AGENTS.md) file to understand our ownership boundaries.
-
----
-
-## ❓ FAQ
-
-**Q: Can I use this for Paper Trading?**  
-A: Yes! Enable `PAPER_TRADING_MODE=True` in the dashboard to test your strategies with zero risk.
-
-**Q: Which API Keys do I need?**  
-A: You need **Coinbase Advanced Trade** keys with `Trade` and `View` permissions. Integrations with Binance and others are ongoing.
-
-**Q: How do I handle Proxmox LXC?**  
-A: Use the Native Linux instructions. Thumber Trader is extremely lightweight and runs perfectly in a 1-core, 512MB RAM Debian LXC.
-
----
-
-## ⚖️ Disclaimer
-
-Trading cryptocurrencies involves significant risk. Thumber Trader is a tool, not a guarantee. **Always test in paper mode first.** Not financial advice.
-
----
-
-*Made with ❤️ by the hikingthunder team.*
+Crypto trading is high risk. Start in paper mode and validate behavior in your environment before any live capital deployment.
