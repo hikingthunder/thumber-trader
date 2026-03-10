@@ -9,7 +9,11 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 
 from app.core.exchange import CoinbaseExchange
 
-async def test_balance_parsing():
+def test_balance_parsing():
+    asyncio.run(_run_balance_parsing_test())
+
+
+async def _run_balance_parsing_test():
     # Mock API key/secret
     api_key = "test_key"
     api_secret = "test_secret"
@@ -96,4 +100,4 @@ async def test_balance_parsing():
     print("\nAll balance parsing tests passed!")
 
 if __name__ == "__main__":
-    asyncio.run(test_balance_parsing())
+    test_balance_parsing()

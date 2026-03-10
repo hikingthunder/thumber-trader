@@ -12,22 +12,28 @@ def calculate_drawdown(equity_series: List[Decimal]) -> Dict[str, Decimal]:
     max_equity = equity_series[0]
     max_dd = Decimal("0")
     current_dd = Decimal("0")
+    trough_since_peak = equity_series[0]
     
     for equity in equity_series:
-        if equity > max_equity:
+        if equity >= max_equity:
             max_equity = equity
+            trough_since_peak = equity
+        else:
+            trough_since_peak = min(trough_since_peak, equity)
         
         if max_equity > 0:
             dd = (max_equity - equity) / max_equity
-            current_dd = dd
             if dd > max_dd:
                 max_dd = dd
+
+    if max_equity > 0 and trough_since_peak < max_equity:
+        current_dd = (max_equity - trough_since_peak) / max_equity
                 
     return {"current": current_dd, "max": max_dd}
 
 def calculate_sharpe_ratio(returns: List[Decimal], risk_free_rate: float = 0.0) -> float:
     """Calculate the Sharpe Ratio for a series of returns."""
-    if len(returns) < 5:
+    if len(returns) < 2:
         return 0.0
     
     # Annualized factor (assuming 1-minute returns)
@@ -46,8 +52,8 @@ def calculate_sharpe_ratio(returns: List[Decimal], risk_free_rate: float = 0.0) 
     return (excess_return / std_dev) * annualized_factor
 
 def calculate_time_to_recovery(equity_series: List[Decimal]) -> float:
-    """Estimate time to recovery from recent drawdown in hours."""
-    if len(equity_series) < 10:
+    """Return elapsed bars since the most recent peak while underwater."""
+    if len(equity_series) < 2:
         return 0.0
         
     # Find the last peak
@@ -58,35 +64,10 @@ def calculate_time_to_recovery(equity_series: List[Decimal]) -> float:
             max_equity = e
             peak_idx = i
             
-    if peak_idx == len(equity_series) - 1:
-        return 0.0 # No drawdown
-        
-    # Calculate recovery rate since peak
-    current_equity = equity_series[-1]
-    lost = max_equity - current_equity
-    if lost <= 0:
+    if peak_idx == len(equity_series) - 1 or equity_series[-1] >= max_equity:
         return 0.0
-        
-    # Regression for recovery slope
-    y = [float(e) for e in equity_series[peak_idx:]]
-    x = list(range(len(y)))
-    
-    if len(x) < 5:
-        return 0.0
-        
-    # Simple linear regression
-    mean_x = sum(x) / len(x)
-    mean_y = sum(y) / len(y)
-    num = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
-    den = sum((xi - mean_x)**2 for xi in x)
-    
-    slope = num / den if den != 0 else 0
-    
-    if slope <= 0:
-        return 999.0 # Not recovering
-        
-    minutes_left = float(lost) / slope
-    return round(minutes_left / 60.0, 1)
+
+    return float(len(equity_series) - 1 - peak_idx)
 
 def get_order_book_density(bids: List[List], asks: List[List], price: Decimal, range_pct: float = 0.01) -> List[Dict]:
     """Generate a density heatmap of the order book around the mid-price."""

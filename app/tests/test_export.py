@@ -61,5 +61,15 @@ class TestExportUtility(unittest.TestCase):
         self.assertIn(b"a,b", content)
         self.assertIn(b"1,2", content)
 
+
+    def test_export_data_workbook_csv_bytes(self):
+        workbook_data = {
+            "Fills": [{"a": 1, "b": 2}],
+            "Fee_Summary": {"total": 3}
+        }
+        content = export_data(workbook_data, "csv")
+        self.assertIsInstance(content, bytes)
+        self.assertIn(b"a,b", content)
+
 if __name__ == '__main__':
     unittest.main()

@@ -6,16 +6,46 @@ from datetime import datetime
 from typing import List, Any, Dict
 from sqlalchemy.inspection import inspect
 
-def export_data(data: List[Dict[str, Any]], headers: List[str], filename_prefix: str, format: str = 'csv'):
-    """
-    Export a list of dictionaries to the specified format.
-    """
+def export_data(data, headers_or_format=None, filename_prefix: str = "export", format: str = 'csv'):
+    """Export trade/accounting data in legacy tuple mode or workbook mode."""
+    # Workbook mode used by /export/generate route.
+    if isinstance(data, dict):
+        file_format = str(headers_or_format or format or "csv").lower()
+        book = tablib.Databook()
+        for sheet_name, rows in data.items():
+            if isinstance(rows, dict):
+                rows = [rows]
+            rows = rows or []
+            dataset = tablib.Dataset(title=str(sheet_name)[:31])
+            headers = list(rows[0].keys()) if rows else []
+            if headers:
+                dataset.headers = headers
+                for row in rows:
+                    dataset.append([row.get(h, "") for h in headers])
+            book.add_sheet(dataset)
+
+        if file_format == "xlsx":
+            return book.export("xlsx")
+        if file_format == "ods":
+            return book.export("ods")
+
+        # tablib Databook has no direct CSV export; flatten each sheet into one text payload.
+        output = io.StringIO()
+        for idx, dataset in enumerate(book._datasets):
+            if idx > 0:
+                output.write("\n")
+            output.write(f"[{dataset.title}]\n")
+            output.write(dataset.export("csv"))
+        return output.getvalue().encode("utf-8")
+
+    # Legacy mode used by tests and helper utilities.
+    headers = list(headers_or_format or [])
     ds = tablib.Dataset()
     ds.headers = headers
-    
+
     for row in data:
         ds.append([row.get(h, "") for h in headers])
-    
+
     if format == 'xlsx':
         content = ds.export('xlsx')
         mimetype = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -36,11 +66,11 @@ def export_data(data: List[Dict[str, Any]], headers: List[str], filename_prefix:
         format = 'csv'
         filename_prefix = f"turbotax_{filename_prefix}"
     else:
-        content = ds.export('csv')
+        content = ds.export('csv').encode('utf-8')
         mimetype = 'text/csv'
-    
+
     filename = f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{format}"
-    
+
     return content, filename, mimetype
 
 
@@ -261,7 +291,7 @@ def models_to_dicts(models: List[Any]) -> List[Dict[str, Any]]:
             if column.key.endswith('_ts') or column.key == 'ts':
                 try:
                     val = datetime.fromtimestamp(float(val)).strftime('%Y-%m-%d %H:%M:%S')
-                except:
+                except (TypeError, ValueError, OSError):
                     pass
             d[column.key] = val
         result.append(d)
