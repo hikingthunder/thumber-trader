@@ -10,8 +10,9 @@ Institutional-style grid trading bot with FastAPI dashboard, strategy controls, 
 - VPIN toxicity controls and risk guardrails
 - Web dashboard with:
   - auth (register/login/session) + audit log filtering
-  - runtime stats and fills widgets
-  - config editor that writes to `.env` with encrypted version history + rollback
+  - runtime stats, fills widgets, and multi-style live market charts (line/area, candlestick, OHLC, Heikin Ashi + additional chart-mode fallbacks)
+  - config editor that writes to `.env` with encrypted version history + rollback and inline recommended defaults
+  - account & security page for username/password updates and 2FA management
   - backtest page
   - export page (CSV/XLSX/ODS)
 - Notifications (Telegram/Discord/Slack/PagerDuty)
@@ -244,4 +245,6 @@ Templates for other AI-agent runtimes live in [`docs/agents/templates/`](docs/ag
 
 ## Disclaimer
 
-Crypto trading is high risk. Start in paper mode and validate behavior in your environment before any live capital deployment.
+Use Thumber Trader at your own risk. This software is provided for operational tooling and research workflows only and is **not** financial, investment, legal, or tax advice.
+
+Crypto trading is high risk. Start in paper mode, validate behavior in your environment, and never deploy live capital you cannot afford to lose.

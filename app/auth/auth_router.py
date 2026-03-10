@@ -7,6 +7,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func
 
 from app.database.db import AsyncSessionLocal
+from app.config import settings
 from app.auth.models import User, AuditLog
 from app.auth.security import (
     hash_password, verify_password, create_access_token,
@@ -51,7 +52,8 @@ async def login_page(request: Request):
         "error": None,
         "show_totp": False,
         "show_register": False,
-        "csrf_token": csrf_token
+        "csrf_token": csrf_token,
+        "hide_shell": True,
     })
 
 
@@ -77,7 +79,8 @@ async def login(
             "error": "Invalid username or password",
             "show_totp": False,
             "show_register": False,
-            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME),
+            "hide_shell": True,
         }, status_code=401)
 
     if not user.is_active:
@@ -86,7 +89,8 @@ async def login(
             "error": "Account is deactivated",
             "show_totp": False,
             "show_register": False,
-            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME),
+            "hide_shell": True,
         }, status_code=403)
 
     # Check TOTP if enabled
@@ -98,7 +102,9 @@ async def login(
                 "show_totp": True,
                 "show_register": False,
                 "username": username,
-                "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
+                "password": password,
+                "csrf_token": request.cookies.get(CSRF_COOKIE_NAME),
+                "hide_shell": True,
             })
         if not user.totp_secret or not verify_totp(user.totp_secret, totp_code):
             await log_audit(user.id, "totp_failed", "", ip, ua)
@@ -108,7 +114,9 @@ async def login(
                 "show_totp": True,
                 "show_register": False,
                 "username": username,
-                "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
+                "password": password,
+                "csrf_token": request.cookies.get(CSRF_COOKIE_NAME),
+                "hide_shell": True,
             }, status_code=401)
 
     # Issue JWT
@@ -157,7 +165,8 @@ async def register_page(request: Request):
             "request": request,
             "error": "Registration is disabled. Contact your administrator.",
             "show_totp": False,
-            "show_register": False
+            "show_register": False,
+            "hide_shell": True,
         })
 
     csrf_token = request.cookies.get(CSRF_COOKIE_NAME) or generate_csrf_token()
@@ -166,7 +175,8 @@ async def register_page(request: Request):
         "error": None,
         "show_totp": False,
         "show_register": True,
-        "csrf_token": csrf_token
+        "csrf_token": csrf_token,
+        "hide_shell": True,
     })
 
 
@@ -193,7 +203,8 @@ async def register(
             "error": "Passwords do not match",
             "show_totp": False,
             "show_register": True,
-            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME),
+            "hide_shell": True,
         }, status_code=400)
 
     if len(password) < 8:
@@ -202,7 +213,8 @@ async def register(
             "error": "Password must be at least 8 characters",
             "show_totp": False,
             "show_register": True,
-            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME),
+            "hide_shell": True,
         }, status_code=400)
 
     async with AsyncSessionLocal() as session:
@@ -234,7 +246,8 @@ async def totp_setup_page(request: Request, user=Depends(get_current_user)):
         "qr_code": qr_b64,
         "secret": secret,
         "error": None,
-        "user": user
+        "user": user,
+        "paper_trading": settings.is_simulated_execution()
     })
 
 
@@ -254,7 +267,8 @@ async def totp_verify(
             "qr_code": qr_b64,
             "secret": secret,
             "error": "Invalid code. Try again.",
-            "user": user
+            "user": user,
+            "paper_trading": settings.is_simulated_execution()
         })
 
     # Save TOTP secret and enable
@@ -307,5 +321,95 @@ async def audit_log_page(request: Request, action: str = "all", user=Depends(get
         "request": request,
         "logs": logs,
         "selected_action": action_filter,
-        "user": user
+        "user": user,
+        "paper_trading": settings.is_simulated_execution(),
     })
+
+
+@auth_router.get("/account", response_class=HTMLResponse)
+async def account_page(request: Request, user=Depends(get_current_user)):
+    """Render account and security settings page."""
+    return templates.TemplateResponse("account.html", {
+        "request": request,
+        "user": user,
+        "paper_trading": settings.is_simulated_execution(),
+        "success": request.query_params.get("success"),
+        "error": request.query_params.get("error"),
+    })
+
+
+@auth_router.post("/account/username")
+async def update_username(
+    request: Request,
+    new_username: str = Form(...),
+    current_password: str = Form(...),
+    user=Depends(get_current_user),
+):
+    """Update account username after password verification."""
+    candidate = new_username.strip()
+    if len(candidate) < 3:
+        return RedirectResponse(url="/auth/account?error=Username+must+be+at+least+3+characters", status_code=303)
+
+    async with AsyncSessionLocal() as session:
+        current = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+        if not verify_password(current_password, current.hashed_password):
+            await log_audit(user.id, "account_username_failed", "Password verification failed", _client_ip(request))
+            return RedirectResponse(url="/auth/account?error=Current+password+is+invalid", status_code=303)
+
+        existing = (await session.execute(select(User).where(User.username == candidate))).scalar_one_or_none()
+        if existing and existing.id != user.id:
+            return RedirectResponse(url="/auth/account?error=Username+is+already+taken", status_code=303)
+
+        current.username = candidate
+        await session.commit()
+
+    await log_audit(user.id, "account_username_updated", f"new_username={candidate}", _client_ip(request))
+    return RedirectResponse(url="/auth/account?success=Username+updated", status_code=303)
+
+
+@auth_router.post("/account/password")
+async def update_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+    user=Depends(get_current_user),
+):
+    """Update account password after current password verification."""
+    if len(new_password) < 8:
+        return RedirectResponse(url="/auth/account?error=New+password+must+be+at+least+8+characters", status_code=303)
+    if new_password != confirm_password:
+        return RedirectResponse(url="/auth/account?error=New+password+and+confirmation+do+not+match", status_code=303)
+
+    async with AsyncSessionLocal() as session:
+        current = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+        if not verify_password(current_password, current.hashed_password):
+            await log_audit(user.id, "account_password_failed", "Password verification failed", _client_ip(request))
+            return RedirectResponse(url="/auth/account?error=Current+password+is+invalid", status_code=303)
+
+        current.hashed_password = hash_password(new_password)
+        await session.commit()
+
+    await log_audit(user.id, "account_password_updated", "Password changed", _client_ip(request))
+    return RedirectResponse(url="/auth/account?success=Password+updated", status_code=303)
+
+
+@auth_router.post("/account/totp/disable")
+async def disable_totp(
+    request: Request,
+    current_password: str = Form(...),
+    user=Depends(get_current_user),
+):
+    """Disable two-factor authentication for the current account."""
+    async with AsyncSessionLocal() as session:
+        current = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+        if not verify_password(current_password, current.hashed_password):
+            await log_audit(user.id, "totp_disable_failed", "Password verification failed", _client_ip(request))
+            return RedirectResponse(url="/auth/account?error=Current+password+is+invalid", status_code=303)
+
+        current.totp_secret = None
+        current.totp_enabled = False
+        await session.commit()
+
+    await log_audit(user.id, "totp_disabled", "2FA disabled from account settings", _client_ip(request))
+    return RedirectResponse(url="/auth/account?success=Two-factor+authentication+disabled", status_code=303)

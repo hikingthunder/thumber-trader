@@ -15,7 +15,7 @@ from sqlalchemy import select, func
 
 from app.core.manager import manager
 from app.core.backtest import BacktestEngine
-from app.config import settings
+from app.config import settings, Settings
 from app.utils.helpers import update_env_file, encrypt_value, decrypt_value
 from app.database.db import AsyncSessionLocal
 from app.database.models import Fill, TaxLotMatch, DailyStats, ConfigVersion
@@ -120,11 +120,18 @@ async def get_config(request: Request, user=Depends(get_current_user)):
     if hasattr(api_key_val, "get_secret_value"):
         api_key_val = api_key_val.get_secret_value()
         
+    recommended_defaults = {
+        name: (str(field.default) if field.default is not None else "")
+        for name, field in Settings.model_fields.items()
+        if field.default is not None
+    }
     context = {
         "request": request,
         "settings": settings,
         "api_key_val": api_key_val or "",
         "config_versions": await _get_recent_config_versions(),
+        "recommended_defaults": recommended_defaults,
+        "paper_trading": settings.is_simulated_execution(),
         "user": user
     }
     return templates.TemplateResponse("config.html", context)
@@ -223,6 +230,7 @@ async def get_backtest(request: Request, user=Depends(get_current_user)):
     context = {
         "request": request,
         "settings": settings,
+        "paper_trading": settings.is_simulated_execution(),
         "user": user
     }
     return templates.TemplateResponse("backtest.html", context)

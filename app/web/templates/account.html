@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card" style="max-width: 900px; margin: 0 auto;">
+    <h2><i data-lucide="user-cog"></i> Account & Security</h2>
+
+    {% if success %}
+    <div class="alert alert-success" style="margin-bottom: 16px;">✅ {{ success }}</div>
+    {% endif %}
+    {% if error %}
+    <div class="alert alert-danger" style="margin-bottom: 16px;">⚠️ {{ error }}</div>
+    {% endif %}
+
+    <div class="dashboard-grid" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px;">
+        <div class="card" style="padding: 18px;">
+            <h2 style="font-size: 1rem; margin-bottom: 12px;"><i data-lucide="badge-check"></i> Username</h2>
+            <form method="post" action="/auth/account/username">
+                <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
+                <div class="form-group">
+                    <label>Current Username</label>
+                    <input type="text" value="{{ user.username }}" disabled>
+                </div>
+                <div class="form-group">
+                    <label>New Username</label>
+                    <input type="text" name="new_username" required minlength="3">
+                </div>
+                <div class="form-group">
+                    <label>Current Password</label>
+                    <input type="password" name="current_password" required autocomplete="current-password">
+                </div>
+                <button class="btn" type="submit">Update Username</button>
+            </form>
+        </div>
+
+        <div class="card" style="padding: 18px;">
+            <h2 style="font-size: 1rem; margin-bottom: 12px;"><i data-lucide="key-round"></i> Password</h2>
+            <form method="post" action="/auth/account/password">
+                <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
+                <div class="form-group">
+                    <label>Current Password</label>
+                    <input type="password" name="current_password" required autocomplete="current-password">
+                </div>
+                <div class="form-group">
+                    <label>New Password</label>
+                    <input type="password" name="new_password" required minlength="8" autocomplete="new-password">
+                </div>
+                <div class="form-group">
+                    <label>Confirm New Password</label>
+                    <input type="password" name="confirm_password" required minlength="8" autocomplete="new-password">
+                </div>
+                <button class="btn" type="submit">Update Password</button>
+            </form>
+        </div>
+
+        <div class="card" style="padding: 18px;">
+            <h2 style="font-size: 1rem; margin-bottom: 12px;"><i data-lucide="shield-check"></i> Two-Factor Authentication</h2>
+            <p class="help-text" style="margin-bottom: 16px;">Status: <strong>{{ 'Enabled' if user.totp_enabled else 'Disabled' }}</strong></p>
+            {% if user.totp_enabled %}
+            <form method="post" action="/auth/account/totp/disable">
+                <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
+                <div class="form-group">
+                    <label>Current Password</label>
+                    <input type="password" name="current_password" required autocomplete="current-password">
+                </div>
+                <button class="btn btn-danger" type="submit">Disable 2FA</button>
+            </form>
+            {% else %}
+            <a href="/auth/totp-setup" class="btn">Enable 2FA</a>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
