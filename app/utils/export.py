@@ -28,7 +28,15 @@ def export_data(data, headers_or_format=None, filename_prefix: str = "export", f
             return book.export("xlsx")
         if file_format == "ods":
             return book.export("ods")
-        return book.export("csv")
+
+        # tablib Databook has no direct CSV export; flatten each sheet into one text payload.
+        output = io.StringIO()
+        for idx, dataset in enumerate(book._datasets):
+            if idx > 0:
+                output.write("\n")
+            output.write(f"[{dataset.title}]\n")
+            output.write(dataset.export("csv"))
+        return output.getvalue().encode("utf-8")
 
     # Legacy mode used by tests and helper utilities.
     headers = list(headers_or_format or [])
@@ -283,7 +291,7 @@ def models_to_dicts(models: List[Any]) -> List[Dict[str, Any]]:
             if column.key.endswith('_ts') or column.key == 'ts':
                 try:
                     val = datetime.fromtimestamp(float(val)).strftime('%Y-%m-%d %H:%M:%S')
-                except:
+                except (TypeError, ValueError, OSError):
                     pass
             d[column.key] = val
         result.append(d)

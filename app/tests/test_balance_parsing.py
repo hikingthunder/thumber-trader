@@ -100,4 +100,4 @@ async def _run_balance_parsing_test():
     print("\nAll balance parsing tests passed!")
 
 if __name__ == "__main__":
-    asyncio.run(test_balance_parsing())
+    test_balance_parsing()
