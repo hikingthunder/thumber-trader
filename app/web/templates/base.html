@@ -317,6 +317,14 @@
             font-weight: 500;
         }
 
+        .app-disclaimer {
+            margin-top: 20px;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            line-height: 1.5;
+            text-align: center;
+        }
+
         /* Micro-animations */
         @keyframes slideUp {
             from { opacity: 0; transform: translateY(20px); }
@@ -339,9 +347,10 @@
 
 <body>
     <div class="container">
+        {% if not hide_shell %}
         <header>
             <div class="header-left">
-                <h1><i data-lucide="zap"></i> Command Center</h1>
+                <h1><i data-lucide="zap"></i> Thumber Trader</h1>
                 {% if paper_trading %}
                 <span class="status-badge status-inactive">
                     <i data-lucide="test-tube"></i> PAPER MODE
@@ -361,6 +370,9 @@
                 <a href="/export" class="{{ 'active' if request.url.path == '/export' else '' }}">
                     <i data-lucide="download"></i> Export
                 </a>
+                <a href="/auth/account" class="{{ 'active' if request.url.path == '/auth/account' else '' }}">
+                    <i data-lucide="user-cog"></i> Account
+                </a>
                 <div class="nav-divider"></div>
                 {% if user %}
                 <span class="user-badge">
@@ -376,8 +388,11 @@
                 </button>
             </nav>
         </header>
+        {% endif %}
 
         {% block content %}{% endblock %}
+
+        <p class="app-disclaimer">Use at your own risk. Thumber Trader is software tooling only and does not provide investment, legal, or tax advice.</p>
     </div>
 
     <!-- Kill Switch Confirmation Modal -->

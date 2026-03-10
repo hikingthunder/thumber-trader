@@ -6,11 +6,26 @@
     <!-- TradingView Lightweight Chart -->
     <div class="card" style="min-height: 400px; --i: 1;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-            <h2 style="margin: 0;"><i data-lucide="candlestick-chart"></i> {{ product_id }} Live Market</h2>
+            <div style="display:flex; align-items:center; gap:12px;">
+                <h2 style="margin: 0;"><i data-lucide="candlestick-chart"></i> {{ product_id }} Live Market</h2>
+                <select id="chart-type" style="background:#020617; color:var(--text-color); border:1px solid var(--border-color); border-radius:8px; padding:6px 10px;">
+                    <option value="area">Line/Area</option>
+                    <option value="candlestick">Japanese Candlestick</option>
+                    <option value="ohlc">OHLC Bars</option>
+                    <option value="heikin_ashi">Heikin Ashi</option>
+                    <option value="line_break">Line Break</option>
+                    <option value="renko">Renko</option>
+                    <option value="kagi">Kagi</option>
+                    <option value="point_figure">Point & Figure</option>
+                    <option value="raindrop">Raindrop</option>
+                    <option value="line">Line</option>
+                </select>
+            </div>
             <div id="chart-price" class="font-mono"
                 style="font-size: 1.5rem; font-weight: 800; color: var(--accent-color); background: rgba(56, 189, 248, 0.1); padding: 4px 12px; border-radius: 8px;">—</div>
         </div>
         <div id="chart" style="width: 100%; height: 320px;"></div>
+        <div id="chart-type-note" class="help-text" style="margin-top:8px;"></div>
     </div>
 
     <!-- Performance Card: 24h Trend Chart -->
@@ -117,7 +132,53 @@
 <script>
     // --- TradingView Chart ---
     const chartContainer = document.getElementById('chart');
-    let chart, lineSeries;
+    const chartTypeSelect = document.getElementById('chart-type');
+    const chartTypeNote = document.getElementById('chart-type-note');
+    let chart, activeSeries;
+    let selectedChartType = localStorage.getItem('thumber_chart_type') || 'area';
+    let lastBar = null;
+
+    function buildHeikinAshi(bar, prevHA) {
+        const haClose = (bar.open + bar.high + bar.low + bar.close) / 4;
+        const haOpen = prevHA ? (prevHA.open + prevHA.close) / 2 : (bar.open + bar.close) / 2;
+        return {
+            time: bar.time,
+            open: haOpen,
+            high: Math.max(bar.high, haOpen, haClose),
+            low: Math.min(bar.low, haOpen, haClose),
+            close: haClose,
+        };
+    }
+
+    function chartTypeInfo(type) {
+        const fallback = ['line_break', 'renko', 'kagi', 'point_figure', 'raindrop'];
+        if (fallback.includes(type)) {
+            return 'Using line-style approximation for this chart family in this release.';
+        }
+        return '';
+    }
+
+    function createSeries(type) {
+        if (!chart) return;
+        if (activeSeries) {
+            chart.removeSeries(activeSeries);
+        }
+        if (type === 'candlestick' || type === 'heikin_ashi') {
+            activeSeries = chart.addCandlestickSeries({
+                upColor: '#10b981', downColor: '#ef4444', borderVisible: false,
+                wickUpColor: '#10b981', wickDownColor: '#ef4444'
+            });
+        } else if (type === 'ohlc') {
+            activeSeries = chart.addBarSeries({ upColor: '#10b981', downColor: '#ef4444' });
+        } else if (type === 'line') {
+            activeSeries = chart.addLineSeries({ color: '#38bdf8', lineWidth: 2 });
+        } else {
+            activeSeries = chart.addAreaSeries({
+                lineColor: '#38bdf8', topColor: 'rgba(56, 189, 248, 0.3)', bottomColor: 'rgba(56, 189, 248, 0.0)', lineWidth: 2
+            });
+        }
+        chartTypeNote.textContent = chartTypeInfo(type);
+    }
 
     if (chartContainer) {
         chart = LightweightCharts.createChart(chartContainer, {
@@ -125,15 +186,22 @@
             height: 320,
             layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#94a3b8' },
             grid: { vertLines: { color: 'rgba(30, 41, 59, 0.3)' }, horzLines: { color: 'rgba(30, 41, 59, 0.3)' } },
-            timeScale: { borderColor: 'rgba(30, 41, 59, 0.5)', timeVisible: true, secondsVisible: false }
+            timeScale: { borderColor: 'rgba(30, 41, 59, 0.5)', timeVisible: true, secondsVisible: false, rightOffset: 0, fixRightEdge: true },
+            rightPriceScale: { borderColor: 'rgba(30, 41, 59, 0.5)' }
         });
-        lineSeries = chart.addAreaSeries({ 
-            lineColor: '#38bdf8', 
-            topColor: 'rgba(56, 189, 248, 0.3)',
-            bottomColor: 'rgba(56, 189, 248, 0.0)',
-            lineWidth: 2 
-        });
+        selectedChartType = chartTypeSelect ? selectedChartType : 'area';
+        if (chartTypeSelect) chartTypeSelect.value = selectedChartType;
+        createSeries(selectedChartType);
         new ResizeObserver(entries => chart.applyOptions({ width: entries[0].contentRect.width })).observe(chartContainer);
+    }
+
+    if (chartTypeSelect) {
+        chartTypeSelect.addEventListener('change', (event) => {
+            selectedChartType = event.target.value;
+            localStorage.setItem('thumber_chart_type', selectedChartType);
+            createSeries(selectedChartType);
+            lastBar = null;
+        });
     }
 
     // --- Performance Mini Chart ---
@@ -203,7 +271,23 @@
             // console.debug("WS Data:", data.type); // Debugging
             
             if (data.type === 'ticker') {
-                lineSeries.update({ time: data.time, value: data.price });
+                if (!activeSeries) return;
+                const barTime = Math.floor(data.time / 60) * 60;
+                if (!lastBar || lastBar.time !== barTime) {
+                    lastBar = { time: barTime, open: data.price, high: data.price, low: data.price, close: data.price };
+                } else {
+                    lastBar.high = Math.max(lastBar.high, data.price);
+                    lastBar.low = Math.min(lastBar.low, data.price);
+                    lastBar.close = data.price;
+                }
+                if (selectedChartType === 'candlestick' || selectedChartType === 'ohlc') {
+                    activeSeries.update(lastBar);
+                } else if (selectedChartType === 'heikin_ashi') {
+                    const ha = buildHeikinAshi(lastBar);
+                    activeSeries.update(ha);
+                } else {
+                    activeSeries.update({ time: data.time, value: data.price });
+                }
                 document.getElementById('chart-price').textContent = '$' + data.price.toLocaleString();
             }
             if (data.type === 'depth') updateDepth(data);

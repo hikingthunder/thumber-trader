@@ -104,11 +104,17 @@
             background: rgba(30, 41, 59, 0.5);
         }
 
-        .help-text {
+                .help-text {
             font-size: 0.75rem;
             color: var(--text-muted);
             margin-top: 6px;
             line-height: 1.4;
+        }
+
+        .recommended-default {
+            font-size: 0.72rem;
+            color: #67e8f9;
+            margin-top: 4px;
         }
 
         .section-intro {
@@ -573,4 +579,16 @@
 
     </div>
 </main>
+
+<script>
+    const recommendedDefaults = {{ recommended_defaults | tojson }};
+    document.querySelectorAll('input[name], select[name], textarea[name]').forEach((field) => {
+        const key = field.name;
+        if (!recommendedDefaults[key]) return;
+        const helper = document.createElement('div');
+        helper.className = 'recommended-default';
+        helper.textContent = `Recommended default: ${recommendedDefaults[key]}`;
+        field.insertAdjacentElement('afterend', helper);
+    });
+</script>
 {% endblock %}

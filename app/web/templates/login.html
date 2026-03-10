@@ -189,14 +189,10 @@
 
         {% elif show_totp %}
         <!-- TOTP Verification -->
-        <form method="post" action="/auth/login" class="auth-form">
+        <form method="post" action="/auth/login" class="auth-form" autocomplete="off">
             <input type="hidden" name="csrf_token" value="{{ csrf_token or request.cookies.get('thumber_csrf_token') }}">
             <input type="hidden" name="username" value="{{ username }}">
-            <div class="form-group">
-                <label>Password</label>
-                <input type="password" name="password" placeholder="Re-enter your password" required
-                    autocomplete="current-password">
-            </div>
+            <input type="hidden" name="password" value="{{ password }}">
             <div class="totp-section">
                 <h3>🔑 Two-Factor Authentication</h3>
                 <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px;">
