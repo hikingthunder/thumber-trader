@@ -98,7 +98,7 @@ async def login(
                 "show_totp": True,
                 "show_register": False,
                 "username": username,
-                "password": password
+                "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
             })
         if not user.totp_secret or not verify_totp(user.totp_secret, totp_code):
             await log_audit(user.id, "totp_failed", "", ip, ua)
@@ -108,7 +108,7 @@ async def login(
                 "show_totp": True,
                 "show_register": False,
                 "username": username,
-                "password": password
+                "csrf_token": request.cookies.get(CSRF_COOKIE_NAME)
             }, status_code=401)
 
     # Issue JWT
