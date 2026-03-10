@@ -1,7 +1,9 @@
 import logging
 import io
+import json
 import time
 import psutil
+from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
@@ -16,7 +18,7 @@ from app.core.backtest import BacktestEngine
 from app.config import settings
 from app.utils.helpers import update_env_file
 from app.database.db import AsyncSessionLocal
-from app.database.models import Fill, TaxLotMatch, DailyStats
+from app.database.models import Fill, TaxLotMatch, DailyStats, ConfigVersion
 from app.auth.security import get_current_user, log_audit
 from app.auth.models import AuditLog
 from app.utils.export import export_data, models_to_dicts, map_to_accounting, get_accounting_headers, calculate_fee_summary
@@ -40,6 +42,53 @@ def _require_admin(user) -> None:
     if getattr(user, "role", None) != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
+
+
+def _get_env_text() -> str:
+    env_path = Path(".env")
+    if not env_path.exists():
+        return ""
+    return env_path.read_text()
+
+
+def _save_env_text(snapshot: str) -> None:
+    env_path = Path(".env")
+    env_path.write_text(snapshot if snapshot.endswith("\n") or not snapshot else snapshot + "\n")
+
+
+def _build_change_summary(changed_keys: list[str], rollback_from_id: Optional[int] = None) -> str:
+    ordered_keys = sorted(changed_keys)
+    preview = ", ".join(ordered_keys[:6])
+    suffix = "" if len(ordered_keys) <= 6 else f" (+{len(ordered_keys)-6} more)"
+    if rollback_from_id is not None:
+        return f"Rollback to config version {rollback_from_id}: {preview}{suffix}"
+    return f"Updated {len(ordered_keys)} keys: {preview}{suffix}"
+
+
+async def _record_config_version(user, changed_keys: list[str], env_snapshot: str, rollback_from_id: Optional[int] = None):
+    actor_name = getattr(user, "username", None) or f"user-{getattr(user, 'id', 'unknown')}"
+    record = ConfigVersion(
+        created_ts=time.time(),
+        actor_user_id=getattr(user, "id", None),
+        actor_username=actor_name,
+        change_summary=_build_change_summary(changed_keys, rollback_from_id=rollback_from_id),
+        changed_keys=json.dumps(sorted(changed_keys)),
+        env_snapshot=env_snapshot,
+        rollback_from_id=rollback_from_id,
+    )
+    async with AsyncSessionLocal() as session:
+        session.add(record)
+        await session.commit()
+
+
+async def _get_recent_config_versions(limit: int = 12) -> list[ConfigVersion]:
+    async with AsyncSessionLocal() as session:
+        stmt = select(ConfigVersion).order_by(ConfigVersion.created_ts.desc()).limit(limit)
+        result = await session.execute(stmt)
+        rows = list(result.scalars().all())
+        for row in rows:
+            row.created_at_label = datetime.fromtimestamp(row.created_ts).strftime("%Y-%m-%d %H:%M:%S")
+        return rows
 
 
 # --- Dashboard ---
@@ -68,6 +117,7 @@ async def get_config(request: Request, user=Depends(get_current_user)):
         "request": request,
         "settings": settings,
         "api_key_val": api_key_val or "",
+        "config_versions": await _get_recent_config_versions(),
         "user": user
     }
     return templates.TemplateResponse("config.html", context)
@@ -101,9 +151,43 @@ async def save_config(request: Request, user=Depends(get_current_user)):
     
     success = update_env_file(updates)
     if success:
+        env_snapshot = _get_env_text()
+        await _record_config_version(user, list(updates.keys()), env_snapshot)
         await log_audit(user.id, "config_change", f"Updated keys: {list(updates.keys())}", _client_ip(request))
-        return HTMLResponse("<div class='alert alert-success'>Configuration saved. Restart required.</div>")
+        return HTMLResponse("<div class='alert alert-success'>Configuration saved and versioned. Restart required.</div>")
     return HTMLResponse("<div class='alert alert-danger'>Failed to save configuration.</div>", status_code=500)
+
+
+
+
+@router.post("/config/rollback")
+async def rollback_config(request: Request, user=Depends(get_current_user)):
+    """Restore a previous .env snapshot from config version history."""
+    _require_admin(user)
+    form_data = await request.form()
+    target_id = form_data.get("version_id")
+    if not target_id:
+        return HTMLResponse("<div class='alert alert-danger'>Missing version_id.</div>", status_code=400)
+
+    try:
+        version_id = int(target_id)
+    except (TypeError, ValueError):
+        return HTMLResponse("<div class='alert alert-danger'>Invalid version_id.</div>", status_code=400)
+
+    async with AsyncSessionLocal() as session:
+        stmt = select(ConfigVersion).where(ConfigVersion.id == version_id)
+        result = await session.execute(stmt)
+        target = result.scalar_one_or_none()
+
+    if target is None:
+        return HTMLResponse("<div class='alert alert-danger'>Config version not found.</div>", status_code=404)
+
+    _save_env_text(target.env_snapshot)
+    env_snapshot = _get_env_text()
+    changed_keys = json.loads(target.changed_keys) if target.changed_keys else []
+    await _record_config_version(user, changed_keys, env_snapshot, rollback_from_id=target.id)
+    await log_audit(user.id, "config_rollback", f"Restored config version #{target.id}", _client_ip(request))
+    return HTMLResponse("<div class='alert alert-success'>Configuration rollback applied. Restart required.</div>")
 
 
 @router.post("/config/test-notifications")

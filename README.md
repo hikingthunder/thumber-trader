@@ -10,7 +10,7 @@ Institutional-style grid trading bot with FastAPI dashboard, strategy controls, 
 - Web dashboard with:
   - auth (register/login/session)
   - runtime stats and fills widgets
-  - config editor that writes to `.env`
+  - config editor that writes to `.env` with version history + rollback
   - backtest page
   - export page (CSV/XLSX/ODS)
 - Notifications (Telegram/Discord/Slack/PagerDuty)
@@ -198,6 +198,11 @@ podman compose logs -f app
 - `WS /ws/dashboard` – realtime dashboard channel
 
 ---
+
+
+## Release enhancement roadmap
+
+Paper trading is stable enough to begin the next hardening wave. The staged plan for shadow-live validation, config rollback, portfolio risk budgets, walk-forward robustness, incident replay, and pre-live readiness gates is documented in `docs/release_enhancement_plan.md`, including owner/status/milestone tracking, implementation checklists, migration notes, and validation/security sign-off criteria.
 
 ## Updating
 
