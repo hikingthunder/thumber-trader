@@ -26,6 +26,28 @@
         overflow-x: auto;
     }
 
+    .filter-pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 12px;
+    }
+
+    .filter-pill {
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        border: 1px solid rgba(56, 189, 248, 0.25);
+        color: var(--text-muted);
+        text-decoration: none;
+    }
+
+    .filter-pill.active {
+        background: rgba(56, 189, 248, 0.18);
+        color: #67e8f9;
+        border-color: rgba(56, 189, 248, 0.45);
+    }
+
     .action-badge {
         display: inline-block;
         padding: 3px 10px;
@@ -42,6 +64,11 @@
     .action-config {
         background: rgba(245, 158, 11, 0.15);
         color: #fbbf24;
+    }
+
+    .action-rollback {
+        background: rgba(168, 85, 247, 0.16);
+        color: #c4b5fd;
     }
 
     .action-error {
@@ -71,6 +98,15 @@
         <div class="audit-count">{{ logs | length }} entries (last 200)</div>
     </div>
 
+
+    <div class="filter-pills">
+        <a class="filter-pill {{ 'active' if selected_action == 'all' else '' }}" href="/auth/audit-log?action=all">All</a>
+        <a class="filter-pill {{ 'active' if selected_action == 'config' else '' }}" href="/auth/audit-log?action=config">Config</a>
+        <a class="filter-pill {{ 'active' if selected_action == 'rollback' else '' }}" href="/auth/audit-log?action=rollback">Rollback</a>
+        <a class="filter-pill {{ 'active' if selected_action == 'auth' else '' }}" href="/auth/audit-log?action=auth">Auth</a>
+        <a class="filter-pill {{ 'active' if selected_action == 'errors' else '' }}" href="/auth/audit-log?action=errors">Errors</a>
+    </div>
+
     <div class="card audit-table">
         <table>
             <thead>
@@ -89,7 +125,9 @@
                         <script>document.write(new Date({{ log.timestamp }} * 1000).toLocaleString())</script>
                     </td>
                     <td>
-                        {% if 'login' in log.action %}
+                        {% if log.action == 'config_rollback' %}
+                        <span class="action-badge action-rollback">{{ log.action }}</span>
+                        {% elif 'login' in log.action %}
                         <span class="action-badge action-login">{{ log.action }}</span>
                         {% elif 'config' in log.action or 'POST' in log.action %}
                         <span class="action-badge action-config">{{ log.action }}</span>

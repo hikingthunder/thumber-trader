@@ -7,7 +7,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func
 
 from app.database.db import AsyncSessionLocal
-from app.auth.models import User
+from app.auth.models import User, AuditLog
 from app.auth.security import (
     hash_password, verify_password, create_access_token,
     generate_totp_secret, get_totp_uri, verify_totp, generate_qr_code_base64,
@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 templates = Jinja2Templates(directory="app/web/templates")
 
+
+
+
+def _apply_audit_filter(stmt, action_filter: str):
+    """Apply a predefined audit action filter to the base query."""
+    if action_filter == "config":
+        return stmt.where(AuditLog.action.like("config%"))
+    if action_filter == "rollback":
+        return stmt.where(AuditLog.action == "config_rollback")
+    if action_filter == "auth":
+        return stmt.where(AuditLog.action.like("%login%"))
+    if action_filter == "errors":
+        return stmt.where((AuditLog.action.like("%error%")) | (AuditLog.action.like("%failed%")))
+    return stmt
 
 def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")
@@ -262,8 +276,8 @@ async def logout(request: Request):
     user = None
     try:
         user = await get_current_user(request)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"Logout called without an active session: {exc}")
 
     if user:
         await log_audit(user.id, "logout", "", _client_ip(request))
@@ -275,20 +289,23 @@ async def logout(request: Request):
 
 
 @auth_router.get("/audit-log", response_class=HTMLResponse)
-async def audit_log_page(request: Request, user=Depends(get_current_user)):
+async def audit_log_page(request: Request, action: str = "all", user=Depends(get_current_user)):
     """Show the audit log (admin only)."""
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    from app.auth.models import AuditLog
+    allowed_actions = {"all", "config", "rollback", "auth", "errors"}
+    action_filter = action if action in allowed_actions else "all"
+
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(200)
-        )
+        stmt = select(AuditLog)
+        stmt = _apply_audit_filter(stmt, action_filter)
+        result = await session.execute(stmt.order_by(AuditLog.timestamp.desc()).limit(200))
         logs = result.scalars().all()
 
     return templates.TemplateResponse("audit_log.html", {
         "request": request,
         "logs": logs,
+        "selected_action": action_filter,
         "user": user
     })

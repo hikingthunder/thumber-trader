@@ -151,6 +151,26 @@
             border-left-color: #ef4444;
             color: #f87171;
         }
+
+        .history-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 0.88rem;
+        }
+
+        .history-table th,
+        .history-table td {
+            padding: 10px;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .history-table th {
+            color: var(--text-muted);
+            font-weight: 600;
+        }
     </style>
 
     <div class="config-container">
@@ -185,10 +205,19 @@
                         blank if already configured.</div>
                 </div>
                 <div class="config-grid">
+                    <div class="form-group">
+                        <label>Execution Mode</label>
+                        <select name="execution_mode">
+                            <option value="live" {{ 'selected' if settings.normalized_execution_mode() == 'live' }}>Live</option>
+                            <option value="paper" {{ 'selected' if settings.normalized_execution_mode() == 'paper' }}>Paper</option>
+                            <option value="shadow_live" {{ 'selected' if settings.normalized_execution_mode() == 'shadow_live' }}>Shadow Live</option>
+                        </select>
+                        <div class="help-text">Shadow Live uses live market data while simulating order execution (no exchange order POST).</div>
+                    </div>
                     <div class="checkbox-group">
                         <input type="checkbox" id="paper_mode" name="paper_trading_mode" {{ 'checked' if
                             settings.paper_trading_mode }}>
-                        <label for="paper_mode" style="margin: 0;">Paper Trading Mode</label>
+                        <label for="paper_mode" style="margin: 0;">Legacy Paper Flag</label>
                     </div>
                     <div class="checkbox-group">
                         <input type="checkbox" id="auto_start" name="auto_start" {{ 'checked' if settings.auto_start }}>
@@ -500,6 +529,48 @@
                 </button>
             </div>
         </form>
+
+        <div class="card" style="margin-top: 24px;">
+            <h2 style="margin-top: 0;">🕘 Configuration History</h2>
+            <p class="section-intro">Latest saved snapshots. Rollback restores a previous `.env` snapshot and records an audit event.</p>
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>Version</th>
+                        <th>Saved At</th>
+                        <th>Actor</th>
+                        <th>Summary</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for version in config_versions %}
+                    <tr>
+                        <td>#{{ version.id }}</td>
+                        <td>{{ version.created_at_label }}</td>
+                        <td>{{ version.actor_username }}</td>
+                        <td>{{ version.change_summary }}</td>
+                        <td>
+                            {% if user.role == 'admin' %}
+                            <form method="post" action="/config/rollback" style="margin: 0;">
+                                <input type="hidden" name="csrf_token" value="{{ request.cookies.get('thumber_csrf_token') }}">
+                                <input type="hidden" name="version_id" value="{{ version.id }}">
+                                <button type="submit" class="btn" style="height: 32px; font-size: 0.8rem; background: rgba(248, 113, 113, 0.15);">Rollback</button>
+                            </form>
+                            {% else %}
+                            <span style="color: var(--text-muted);">Admin only</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="5" style="color: var(--text-muted);">No config versions saved yet.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
     </div>
 </main>
 {% endblock %}

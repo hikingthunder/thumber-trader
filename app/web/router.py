@@ -1,7 +1,9 @@
 import logging
 import io
+import json
 import time
 import psutil
+from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
@@ -14,9 +16,9 @@ from sqlalchemy import select, func
 from app.core.manager import manager
 from app.core.backtest import BacktestEngine
 from app.config import settings
-from app.utils.helpers import update_env_file
+from app.utils.helpers import update_env_file, encrypt_value, decrypt_value
 from app.database.db import AsyncSessionLocal
-from app.database.models import Fill, TaxLotMatch, DailyStats
+from app.database.models import Fill, TaxLotMatch, DailyStats, ConfigVersion
 from app.auth.security import get_current_user, log_audit
 from app.auth.models import AuditLog
 from app.utils.export import export_data, models_to_dicts, map_to_accounting, get_accounting_headers, calculate_fee_summary
@@ -42,6 +44,59 @@ def _require_admin(user) -> None:
 
 
 
+def _get_env_text() -> str:
+    env_path = Path(".env")
+    if not env_path.exists():
+        return ""
+    return env_path.read_text()
+
+
+def _save_env_text(snapshot: str) -> None:
+    env_path = Path(".env")
+    text = snapshot if snapshot.endswith("\n") or not snapshot else snapshot + "\n"
+    env_path.write_text(text)
+    try:
+        env_path.chmod(0o600)
+    except Exception as exc:
+        logger.debug(f"Unable to enforce 0600 on .env during save: {exc}")
+
+
+def _build_change_summary(changed_keys: list[str], rollback_from_id: Optional[int] = None) -> str:
+    ordered_keys = sorted(changed_keys)
+    preview = ", ".join(ordered_keys[:6])
+    suffix = "" if len(ordered_keys) <= 6 else f" (+{len(ordered_keys)-6} more)"
+    if rollback_from_id is not None:
+        return f"Rollback to config version {rollback_from_id}: {preview}{suffix}"
+    return f"Updated {len(ordered_keys)} keys: {preview}{suffix}"
+
+
+async def _record_config_version(user, changed_keys: list[str], env_snapshot: str, rollback_from_id: Optional[int] = None):
+    actor_name = getattr(user, "username", None) or f"user-{getattr(user, 'id', 'unknown')}"
+    encrypted_snapshot = encrypt_value(env_snapshot)
+    record = ConfigVersion(
+        created_ts=time.time(),
+        actor_user_id=getattr(user, "id", None),
+        actor_username=actor_name,
+        change_summary=_build_change_summary(changed_keys, rollback_from_id=rollback_from_id),
+        changed_keys=json.dumps(sorted(changed_keys)),
+        env_snapshot=encrypted_snapshot,
+        rollback_from_id=rollback_from_id,
+    )
+    async with AsyncSessionLocal() as session:
+        session.add(record)
+        await session.commit()
+
+
+async def _get_recent_config_versions(limit: int = 12) -> list[ConfigVersion]:
+    async with AsyncSessionLocal() as session:
+        stmt = select(ConfigVersion).order_by(ConfigVersion.created_ts.desc()).limit(limit)
+        result = await session.execute(stmt)
+        rows = list(result.scalars().all())
+        for row in rows:
+            row.created_at_label = datetime.fromtimestamp(row.created_ts).strftime("%Y-%m-%d %H:%M:%S")
+        return rows
+
+
 # --- Dashboard ---
 @router.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard(request: Request, user=Depends(get_current_user)):
@@ -49,7 +104,8 @@ async def get_dashboard(request: Request, user=Depends(get_current_user)):
     context = {
         "request": request,
         "product_id": settings.product_id,
-        "paper_trading": settings.paper_trading_mode,
+        "paper_trading": settings.is_simulated_execution(),
+        "execution_mode": settings.normalized_execution_mode(),
         "user": user
     }
     return templates.TemplateResponse("index.html", context)
@@ -68,6 +124,7 @@ async def get_config(request: Request, user=Depends(get_current_user)):
         "request": request,
         "settings": settings,
         "api_key_val": api_key_val or "",
+        "config_versions": await _get_recent_config_versions(),
         "user": user
     }
     return templates.TemplateResponse("config.html", context)
@@ -79,6 +136,10 @@ async def save_config(request: Request, user=Depends(get_current_user)):
     _require_admin(user)
     form_data = await request.form()
     updates = {k.upper(): v for k, v in form_data.items() if v and k != "csrf_token"}
+
+    execution_mode = str(form_data.get("execution_mode", "")).strip().lower()
+    if execution_mode in {"live", "paper", "shadow_live"}:
+        updates["EXECUTION_MODE"] = execution_mode
 
     bool_fields = {
         "paper_trading_mode",
@@ -98,12 +159,52 @@ async def save_config(request: Request, user=Depends(get_current_user)):
     }
     for field in bool_fields:
         updates[field.upper()] = "true" if field in form_data else "false"
+
+    if execution_mode in {"paper", "shadow_live"}:
+        updates["PAPER_TRADING_MODE"] = "true"
+    elif execution_mode == "live":
+        updates["PAPER_TRADING_MODE"] = "false"
     
     success = update_env_file(updates)
     if success:
+        env_snapshot = _get_env_text()
+        await _record_config_version(user, list(updates.keys()), env_snapshot)
         await log_audit(user.id, "config_change", f"Updated keys: {list(updates.keys())}", _client_ip(request))
-        return HTMLResponse("<div class='alert alert-success'>Configuration saved. Restart required.</div>")
+        return HTMLResponse("<div class='alert alert-success'>Configuration saved and versioned. Restart required.</div>")
     return HTMLResponse("<div class='alert alert-danger'>Failed to save configuration.</div>", status_code=500)
+
+
+
+
+@router.post("/config/rollback")
+async def rollback_config(request: Request, user=Depends(get_current_user)):
+    """Restore a previous .env snapshot from config version history."""
+    _require_admin(user)
+    form_data = await request.form()
+    target_id = form_data.get("version_id")
+    if not target_id:
+        return HTMLResponse("<div class='alert alert-danger'>Missing version_id.</div>", status_code=400)
+
+    try:
+        version_id = int(target_id)
+    except (TypeError, ValueError):
+        return HTMLResponse("<div class='alert alert-danger'>Invalid version_id.</div>", status_code=400)
+
+    async with AsyncSessionLocal() as session:
+        stmt = select(ConfigVersion).where(ConfigVersion.id == version_id)
+        result = await session.execute(stmt)
+        target = result.scalar_one_or_none()
+
+    if target is None:
+        return HTMLResponse("<div class='alert alert-danger'>Config version not found.</div>", status_code=404)
+
+    snapshot_text = decrypt_value(target.env_snapshot)
+    _save_env_text(snapshot_text)
+    env_snapshot = _get_env_text()
+    changed_keys = json.loads(target.changed_keys) if target.changed_keys else []
+    await _record_config_version(user, changed_keys, env_snapshot, rollback_from_id=target.id)
+    await log_audit(user.id, "config_rollback", f"Restored config version #{target.id}", _client_ip(request))
+    return HTMLResponse("<div class='alert alert-success'>Configuration rollback applied. Restart required.</div>")
 
 
 @router.post("/config/test-notifications")
@@ -170,7 +271,8 @@ async def get_dashboard_stats(request: Request, user=Depends(get_current_user)):
         "stats": s,
         "total_realized_pnl": stats.get("total_realized_pnl", 0),
         "total_unrealized_pnl": stats.get("total_unrealized_pnl", 0),
-        "total_fees": total_fees
+        "total_fees": total_fees,
+        "execution_mode": (s.get("execution_mode") if s else settings.normalized_execution_mode())
     }
     return templates.TemplateResponse("partials/stats.html", context)
 
@@ -378,7 +480,8 @@ async def get_export_view(request: Request, user=Depends(get_current_user)):
         "request": request,
         "user": user,
         "product_id": settings.product_id,
-        "paper_trading": settings.paper_trading_mode,
+        "paper_trading": settings.is_simulated_execution(),
+        "execution_mode": settings.normalized_execution_mode(),
         "formats": ["csv", "xlsx", "ods"],
         "tax_methods": ["FIFO", "LIFO", "HIFO"]
     }
