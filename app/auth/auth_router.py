@@ -13,7 +13,7 @@ from app.auth.security import (
     hash_password, verify_password, create_access_token,
     generate_totp_secret, get_totp_uri, verify_totp, generate_qr_code_base64,
     generate_csrf_token, get_current_user, log_audit,
-    COOKIE_NAME, CSRF_COOKIE_NAME, ACCESS_TOKEN_EXPIRE_MINUTES
+    COOKIE_NAME, CSRF_COOKIE_NAME, session_timeout_seconds
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,8 @@ async def login_page(request: Request):
         "show_register": False,
         "csrf_token": csrf_token,
         "hide_shell": True,
+        "session_timeout_enabled": settings.session_timeout_enabled,
+        "session_timeout_minutes": settings.session_timeout_minutes,
     })
 
 
@@ -138,7 +140,7 @@ async def login(
         value=token,
         httponly=True,
         samesite="lax",
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        max_age=session_timeout_seconds() or None,
         secure=secure_cookie
     )
     # Set CSRF token
@@ -147,7 +149,7 @@ async def login(
         key=CSRF_COOKIE_NAME,
         value=csrf,
         samesite="lax",
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        max_age=session_timeout_seconds() or None,
         secure=secure_cookie
     )
     return response
@@ -177,6 +179,8 @@ async def register_page(request: Request):
         "show_register": True,
         "csrf_token": csrf_token,
         "hide_shell": True,
+        "session_timeout_enabled": settings.session_timeout_enabled,
+        "session_timeout_minutes": settings.session_timeout_minutes,
     })
 
 

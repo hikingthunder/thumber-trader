@@ -162,7 +162,8 @@ async def save_config(request: Request, user=Depends(get_current_user)):
         "notify_on_trade",
         "notify_on_grid_breach",
         "notify_on_error",
-        "notify_on_daily_summary"
+        "notify_on_daily_summary",
+        "session_timeout_enabled"
     }
     for field in bool_fields:
         updates[field.upper()] = "true" if field in form_data else "false"

@@ -230,7 +230,12 @@
             <a href="/auth/login">← Back to Sign In</a>
             {% else %}
             <span style="color: var(--text-muted); font-size: 0.8rem;">
-                Secure access • Session expires after {{ session_timeout_minutes | default(60) }} minutes
+                Secure access •
+                {% if session_timeout_enabled | default(true) %}
+                Session expires after {{ session_timeout_minutes | default(60) }} minutes
+                {% else %}
+                Session timeout disabled
+                {% endif %}
             </span>
             {% endif %}
         </div>

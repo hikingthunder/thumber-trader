@@ -28,9 +28,16 @@ if not SECRET_KEY:
         "JWT_SECRET_KEY not configured; using ephemeral in-memory key. Set JWT_SECRET_KEY for persistent sessions."
     )
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "60"))
+ACCESS_TOKEN_EXPIRE_MINUTES = max(settings.session_timeout_minutes, 1)
 COOKIE_NAME = "thumber_access_token"
 CSRF_COOKIE_NAME = "thumber_csrf_token"
+
+def session_timeout_seconds() -> int:
+    """Return configured session timeout in seconds. 0 means disabled."""
+    if not settings.session_timeout_enabled:
+        return 0
+    return max(settings.session_timeout_minutes, 1) * 60
+
 
 # --- Password Hashing ---
 # Use pbkdf2_sha256 because it's robust and avoids bcrypt's 72-byte limit and compatibility issues in some environments.
@@ -50,7 +57,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 # --- JWT Tokens ---
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    expire = time.time() + (expires_delta.total_seconds() if expires_delta else ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    if expires_delta:
+        expire = time.time() + expires_delta.total_seconds()
+    else:
+        timeout_seconds = session_timeout_seconds()
+        expire = time.time() + timeout_seconds if timeout_seconds > 0 else time.time() + (60 * 60 * 24 * 365 * 10)
     to_encode.update({"exp": expire, "iat": time.time()})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -101,16 +112,16 @@ async def get_current_user(request: Request):
 
     token = request.cookies.get(COOKIE_NAME)
     if not token:
-        # For API endpoints, raise 401; for pages, redirect to login
-        if request.url.path.startswith("/api/") or request.url.path.startswith("/ws/"):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+        # For API/HTMX endpoints, raise 401; for pages, redirect to login
+        if request.url.path.startswith("/api/") or request.url.path.startswith("/ws/") or request.headers.get("HX-Request") == "true":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated", headers={"HX-Redirect": "/auth/login"})
         raise HTTPException(status_code=status.HTTP_307_TEMPORARY_REDIRECT,
                             headers={"Location": "/auth/login"})
 
     payload = decode_access_token(token)
     if not payload:
-        if request.url.path.startswith("/api/") or request.url.path.startswith("/ws/"):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired or invalid")
+        if request.url.path.startswith("/api/") or request.url.path.startswith("/ws/") or request.headers.get("HX-Request") == "true":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired or invalid", headers={"HX-Redirect": "/auth/login"})
         raise HTTPException(status_code=status.HTTP_307_TEMPORARY_REDIRECT,
                             headers={"Location": "/auth/login"})
 

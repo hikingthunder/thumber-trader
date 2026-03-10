@@ -35,7 +35,11 @@
 
     <div class="stat-item">
         <span class="stat-label">Execution Mode</span>
-        <span class="stat-value font-mono" style="color: var(--accent-color);">{{ execution_mode|upper }}</span>
+        {% set sim_mode = execution_mode in ['paper', 'shadow_live'] %}
+        <span class="status-badge {{ 'status-inactive' if sim_mode else 'status-active' }}" style="width: fit-content; font-size: 0.75rem; padding: 4px 8px;">
+            <i data-lucide="{{ 'test-tube' if sim_mode else 'shield-check' }}"></i>
+            {{ execution_mode|upper }}
+        </span>
     </div>
 
     <div class="stat-item">

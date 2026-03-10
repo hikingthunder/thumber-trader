@@ -11,7 +11,7 @@ Institutional-style grid trading bot with FastAPI dashboard, strategy controls, 
 - Web dashboard with:
   - auth (register/login/session) + audit log filtering
   - runtime stats, fills widgets, and multi-style live market charts (line/area, candlestick, OHLC, Heikin Ashi + additional chart-mode fallbacks)
-  - config editor that writes to `.env` with encrypted version history + rollback and inline recommended defaults
+  - config editor that writes to `.env` with encrypted version history + rollback, hover descriptions, and inline recommended defaults
   - account & security page for username/password updates and 2FA management
   - backtest page
   - export page (CSV/XLSX/ODS)
@@ -185,6 +185,7 @@ podman compose logs -f app
 - added ignores for private keys/certs and secret artifacts
 - keep API keys only in `.env` or external secret manager
 - leave `JWT_SECRET_KEY` empty for ephemeral sessions, or set a long random value for persistent logins
+- tune or disable auth session timeout from Config → Session Timeout (`SESSION_TIMEOUT_ENABLED`, `SESSION_TIMEOUT_MINUTES`)
 - rotate credentials after any accidental exposure
 
 ---
@@ -218,6 +219,12 @@ sudo systemctl restart thumber-trader
 ```
 
 If you deployed with `scripts/install_lxc.sh`, update as:
+
+```bash
+sudo bash /opt/thumber-trader/scripts/update_lxc.sh
+```
+
+(Manual equivalent)
 
 ```bash
 sudo -u thumber git -C /opt/thumber-trader pull --ff-only
