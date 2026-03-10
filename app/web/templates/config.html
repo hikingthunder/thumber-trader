@@ -104,7 +104,34 @@
             background: rgba(30, 41, 59, 0.5);
         }
 
-                .help-text {
+        .checkbox-content {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            width: 100%;
+        }
+
+        .checkbox-label-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .field-help-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            color: var(--text-muted);
+            font-size: 0.7rem;
+            font-weight: 700;
+            cursor: help;
+        }
+
+        .help-text {
             font-size: 0.75rem;
             color: var(--text-muted);
             margin-top: 6px;
@@ -221,13 +248,39 @@
                         <div class="help-text">Shadow Live uses live market data while simulating order execution (no exchange order POST).</div>
                     </div>
                     <div class="checkbox-group">
-                        <input type="checkbox" id="paper_mode" name="paper_trading_mode" {{ 'checked' if
-                            settings.paper_trading_mode }}>
-                        <label for="paper_mode" style="margin: 0;">Legacy Paper Flag</label>
+                        <input type="checkbox" id="paper_mode" name="paper_trading_mode" {{ 'checked' if settings.paper_trading_mode }}>
+                        <div class="checkbox-content">
+                            <div class="checkbox-label-row">
+                                <label for="paper_mode" style="margin: 0;">Legacy Paper Flag</label>
+                            </div>
+                        </div>
                     </div>
                     <div class="checkbox-group">
                         <input type="checkbox" id="auto_start" name="auto_start" {{ 'checked' if settings.auto_start }}>
-                        <label for="auto_start" style="margin: 0;">Auto-Start Engine</label>
+                        <div class="checkbox-content">
+                            <div class="checkbox-label-row">
+                                <label for="auto_start" style="margin: 0;">Auto-Start Engine</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="config-section">
+                <h2>⏱️ Session Timeout</h2>
+                <p class="section-intro">Control whether web sessions expire automatically and for how long.</p>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="session_timeout_enabled" name="session_timeout_enabled" {{ 'checked' if settings.session_timeout_enabled }}>
+                    <div class="checkbox-content">
+                        <div class="checkbox-label-row">
+                            <label for="session_timeout_enabled" style="margin: 0;">Enable Session Timeout</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>Session Timeout (Minutes)</label>
+                        <input type="number" min="1" name="session_timeout_minutes" value="{{ settings.session_timeout_minutes }}">
                     </div>
                 </div>
             </div>
@@ -582,13 +635,66 @@
 
 <script>
     const recommendedDefaults = {{ recommended_defaults | tojson }};
+    const settingDescriptions = {
+        execution_mode: 'Choose between live exchange execution, paper simulation, or shadow-live simulation on live market data.',
+        paper_trading_mode: 'Legacy compatibility flag. Execution Mode above is the preferred setting.',
+        auto_start: 'Automatically starts the trading engine when the application boots.',
+        session_timeout_enabled: 'When enabled, users are automatically signed out after the configured idle/session duration.',
+        session_timeout_minutes: 'How long a login session remains valid before re-authentication is required.',
+        product_ids: 'Comma-separated Coinbase products to trade, such as BTC-USD,ETH-USD.',
+        grid_lines: 'Number of grid levels used for placing staggered buy and sell orders.',
+        grid_band_pct: 'Total percentage band around market price covered by the active grid.',
+        min_grid_profit_pct: 'Minimum expected profit threshold per completed grid cycle.',
+        poll_seconds: 'How often the bot refreshes market state and trading decisions.'
+    };
+
     document.querySelectorAll('input[name], select[name], textarea[name]').forEach((field) => {
         const key = field.name;
+        if (!key || key === 'csrf_token' || key === 'version_id') return;
+
+        const fieldId = field.id || key;
+        if (!field.id) field.id = fieldId;
+        const label = document.querySelector(`label[for="${fieldId}"]`) || field.closest('.form-group, .checkbox-group')?.querySelector('label');
+
+        const sectionTitle = field.closest('.config-section')?.querySelector('h2')?.textContent?.trim();
+        const fallbackDescription = label ? `${label.textContent.trim()} setting${sectionTitle ? ` in ${sectionTitle}` : ''}.` : null;
+        const description = settingDescriptions[key] || fallbackDescription;
+        if (description) {
+            field.title = description;
+            if (label) {
+                label.title = description;
+                const row = label.closest('.checkbox-label-row') || label;
+                const hasIcon = row.querySelector && row.querySelector('.field-help-icon');
+                if (!hasIcon) {
+                    const icon = document.createElement('span');
+                    icon.className = 'field-help-icon';
+                    icon.title = description;
+                    icon.setAttribute('aria-label', description);
+                    icon.textContent = 'i';
+                    if (row.classList && row.classList.contains('checkbox-label-row')) {
+                        row.appendChild(icon);
+                    } else {
+                        label.insertAdjacentElement('afterend', icon);
+                    }
+                }
+            }
+        }
+
         if (!recommendedDefaults[key]) return;
         const helper = document.createElement('div');
         helper.className = 'recommended-default';
         helper.textContent = `Recommended default: ${recommendedDefaults[key]}`;
-        field.insertAdjacentElement('afterend', helper);
+
+        if (field.type === 'checkbox') {
+            const checkboxContent = field.closest('.checkbox-group')?.querySelector('.checkbox-content');
+            if (checkboxContent) {
+                checkboxContent.appendChild(helper);
+            } else {
+                field.insertAdjacentElement('afterend', helper);
+            }
+        } else {
+            field.insertAdjacentElement('afterend', helper);
+        }
     });
 </script>
 {% endblock %}

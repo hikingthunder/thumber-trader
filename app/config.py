@@ -252,6 +252,8 @@ class Settings(BaseSettings):
     # Security
     jwt_secret_key: Optional[str] = None
     tradingview_webhook_secret: Optional[SecretStr] = None
+    session_timeout_enabled: bool = True
+    session_timeout_minutes: int = 60
 
     model_config = SettingsConfigDict(
         env_file=".env",

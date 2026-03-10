@@ -441,6 +441,27 @@
         // Init Lucide Icons
         lucide.createIcons();
 
+        document.body.addEventListener('htmx:afterSwap', () => {
+            lucide.createIcons();
+        });
+
+        document.body.addEventListener('htmx:beforeSwap', (event) => {
+            const xhr = event.detail.xhr;
+            const hxRedirect = xhr.getResponseHeader('HX-Redirect');
+            if (hxRedirect) {
+                window.location.href = hxRedirect;
+                event.detail.shouldSwap = false;
+                return;
+            }
+
+            const locationHeader = xhr.getResponseHeader('Location');
+            const redirectedToLogin = xhr.responseURL && xhr.responseURL.includes('/auth/login');
+            if (xhr.status === 401 || xhr.status === 403 || locationHeader === '/auth/login' || redirectedToLogin) {
+                window.location.href = '/auth/login';
+                event.detail.shouldSwap = false;
+            }
+        });
+
         // HTMX CSRF Configuration
         document.body.addEventListener('htmx:configRequest', (event) => {
             const token = getCookie('thumber_csrf_token');

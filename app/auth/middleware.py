@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.database.db import AsyncSessionLocal
 from app.auth.security import CSRF_COOKIE_NAME
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -139,15 +140,21 @@ class SessionTimeoutMiddleware(BaseHTTPMiddleware):
 
         from app.auth.security import COOKIE_NAME, decode_access_token
 
+        if not settings.session_timeout_enabled:
+            return await call_next(request)
+
         token = request.cookies.get(COOKIE_NAME)
         if token:
             payload = decode_access_token(token)
             if payload:
                 exp = payload.get("exp", 0)
                 if time.time() > exp:
-                    # Token expired — redirect to login
-                    from starlette.responses import RedirectResponse
-                    response = RedirectResponse(url="/auth/login", status_code=303)
+                    if request.headers.get("HX-Request") == "true":
+                        response = Response(status_code=401)
+                        response.headers["HX-Redirect"] = "/auth/login"
+                    else:
+                        from starlette.responses import RedirectResponse
+                        response = RedirectResponse(url="/auth/login", status_code=303)
                     response.delete_cookie(COOKIE_NAME)
                     return response
 
