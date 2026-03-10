@@ -85,7 +85,7 @@ async def dashboard_websocket(
                 msg = json.loads(data)
                 if msg.get("action") == "ping":
                     await websocket.send_text(json.dumps({"type": "pong"}))
-            except:
+            except (json.JSONDecodeError, TypeError):
                 pass
     except WebSocketDisconnect:
         browser_ws_manager.disconnect(websocket)

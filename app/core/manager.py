@@ -258,7 +258,7 @@ class StrategyManager:
                 from datetime import datetime
                 iso_str = t_val.replace('Z', '+00:00')
                 t_val = datetime.fromisoformat(iso_str).timestamp()
-            except:
+            except (TypeError, ValueError):
                 t_val = time.time()
 
         await browser_ws_manager.broadcast({
