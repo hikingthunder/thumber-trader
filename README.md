@@ -202,7 +202,7 @@ podman compose logs -f app
 
 ## Release enhancement roadmap
 
-Paper trading is stable enough to begin the next hardening wave. The staged plan for shadow-live validation, config rollback, portfolio risk budgets, walk-forward robustness, incident replay, and pre-live readiness gates is documented in `docs/release_enhancement_plan.md`.
+Paper trading is stable enough to begin the next hardening wave. The staged plan for shadow-live validation, config rollback, portfolio risk budgets, walk-forward robustness, incident replay, and pre-live readiness gates is documented in `docs/release_enhancement_plan.md`, including owner/status/milestone tracking, implementation checklists, migration notes, and validation/security sign-off criteria.
 
 ## Updating
 

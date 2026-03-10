@@ -23,3 +23,4 @@ Template for Copilot-driven tasks to align with project standards.
 - Align task proposals and implementation sequencing with `docs/release_enhancement_plan.md`.
 - When adding one of the roadmap features, include explicit handoff notes for next owner (Core → Frontend → Data → QA → SecOps as applicable).
 - Keep README references in sync when roadmap items are added, removed, or re-prioritized.
+- Update roadmap tracking fields (status/owner/milestone/PR links/last-updated) when delivering roadmap features.
