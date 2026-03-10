@@ -84,7 +84,7 @@ class SmartOrderRouter:
             limit_price = limit_price.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
             
             try:
-                if settings.paper_trading_mode:
+                if settings.is_simulated_execution():
                     child_id = f"sor-paper-{uuid.uuid4()}"
                     child_orders.append({
                         "order_id": child_id,

@@ -21,11 +21,11 @@ Also include migration notes, security sign-off, and validation command outputs 
 **Outcome:** Validate slippage/latency/fill-quality assumptions without risking funds.
 
 **Tracking**
-- Status: `not_started`
+- Status: `in_progress`
 - Owner: `Core Trading Engine Agent`
 - Target milestone: `v2.0.1`
-- PR link(s): _TBD_
-- Last updated: `2026-03-09`
+- PR link(s): `current shadow-mode wiring commit`
+- Last updated: `2026-03-10`
 
 **Scope:**
 - `app/core/engine.py`, `app/core/manager.py`, `app/core/sor.py`, `app/core/exchange.py`
@@ -34,10 +34,10 @@ Also include migration notes, security sign-off, and validation command outputs 
 - `app/tests/`
 
 **Implementation checklist:**
-- [ ] Add `SHADOW_LIVE` execution mode toggle and runtime wiring.
-- [ ] Ensure no exchange order POST path can execute in shadow mode.
+- [x] Add `SHADOW_LIVE` execution mode toggle and runtime wiring.
+- [x] Ensure no exchange order POST path can execute in shadow mode.
 - [ ] Persist decision-time order book snapshots for simulated fills.
-- [ ] Add simulated vs theoretical fill-quality metrics for dashboard + `/metrics`.
+- [x] Add simulated vs theoretical fill-quality metrics for dashboard + `/metrics`.
 - [ ] Add deterministic tests proving live order path is never called in shadow mode.
 
 **Migration / backward compatibility notes:**
@@ -59,11 +59,11 @@ Also include migration notes, security sign-off, and validation command outputs 
 **Outcome:** Operators can safely revert bad runtime changes.
 
 **Tracking**
-- Status: `in_progress`
+- Status: `done`
 - Owner: `Frontend & UX Agent` + `Data & Analytics Agent`
 - Target milestone: `v2.0.1`
-- PR link(s): `latest commit on current branch`
-- Last updated: `2026-03-09`
+- PR link(s): `53b06f4`, `6776ffa`, `cf67061`, `current integration-test commit`
+- Last updated: `2026-03-10`
 
 **Scope:**
 - `app/database/models.py`, `app/database/db.py`
@@ -74,8 +74,8 @@ Also include migration notes, security sign-off, and validation command outputs 
 - [x] Persist config snapshots with actor metadata.
 - [x] Add role-gated rollback endpoint and audit event.
 - [x] Render recent config history and rollback action in config UI.
-- [ ] Add audit-log UI enhancement for rollback detail filtering/visibility.
-- [ ] Add integration test coverage for save→rollback roundtrip through HTTP endpoints.
+- [x] Add audit-log UI enhancement for rollback detail filtering/visibility.
+- [x] Add integration test coverage for save→rollback roundtrip through HTTP endpoints.
 
 **Migration / backward compatibility notes:**
 - New config version table must be additive and safe for existing DBs.
@@ -100,7 +100,7 @@ Also include migration notes, security sign-off, and validation command outputs 
 - Owner: `Core Trading Engine Agent`
 - Target milestone: `v2.0.2`
 - PR link(s): _TBD_
-- Last updated: `2026-03-09`
+- Last updated: `2026-03-10`
 
 **Scope:**
 - `app/config.py`, `.env.example`

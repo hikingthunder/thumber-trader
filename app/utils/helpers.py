@@ -27,8 +27,8 @@ def _get_key_from_env() -> Optional[bytes]:
             # Set restrictive permissions (rw-------)
             try:
                 os.chmod(enc_file, 0o600)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.debug(f"Unable to set 0600 permissions on .enc_key: {exc}")
             logging.info("Generated new local encryption key in .enc_key")
     
     kdf = PBKDF2HMAC(
@@ -178,6 +178,6 @@ def update_env_file(updates: dict):
     # Set restrictive permissions (rw-------)
     try:
         os.chmod(env_path, 0o600)
-    except Exception:
+    except Exception as exc:
         # Best effort for permissions
-        pass
+        logging.debug(f"Unable to enforce 0600 permissions on .env: {exc}")

@@ -131,6 +131,7 @@ class Settings(BaseSettings):
     inventory_cap_max_pct: Decimal = Decimal("0.80")
 
     # Execution Mode
+    execution_mode: str = "live"  # live | paper | shadow_live
     paper_trading_mode: bool = False
     paper_start_usd: Decimal = Decimal("1000")
     paper_start_btc: Decimal = Decimal("0")
@@ -291,5 +292,20 @@ class Settings(BaseSettings):
                     elif isinstance(value, str) and (value.startswith("ENC:") or value.startswith("AES:")):
                         setattr(self, field_name, decrypt_value(value))
         return self
+
+
+    def normalized_execution_mode(self) -> str:
+        mode = (self.execution_mode or "").strip().lower()
+        if mode not in {"live", "paper", "shadow_live"}:
+            mode = "paper" if self.paper_trading_mode else "live"
+        if self.paper_trading_mode and mode == "live":
+            mode = "paper"
+        return mode
+
+    def is_simulated_execution(self) -> bool:
+        return self.normalized_execution_mode() in {"paper", "shadow_live"}
+
+    def is_shadow_live_execution(self) -> bool:
+        return self.normalized_execution_mode() == "shadow_live"
 
 settings = Settings()

@@ -5,12 +5,13 @@ Institutional-style grid trading bot with FastAPI dashboard, strategy controls, 
 ## What this project includes
 
 - Adaptive grid engine (`arithmetic` or `geometric` spacing)
+- Execution modes: Live, Paper, and Shadow Live (simulated execution on live market data)
 - Alpha fusion controls (RSI, MACD, imbalance weighting)
 - VPIN toxicity controls and risk guardrails
 - Web dashboard with:
-  - auth (register/login/session)
+  - auth (register/login/session) + audit log filtering
   - runtime stats and fills widgets
-  - config editor that writes to `.env` with version history + rollback
+  - config editor that writes to `.env` with encrypted version history + rollback
   - backtest page
   - export page (CSV/XLSX/ODS)
 - Notifications (Telegram/Discord/Slack/PagerDuty)

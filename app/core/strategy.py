@@ -32,6 +32,8 @@ class GridStrategy(StrategyEngine):
         self.equity_history: List[Decimal] = []
         self.realized_pnl = Decimal("0")
         self.last_equity_update: float = 0.0
+        self.shadow_fill_count: int = 0
+        self.shadow_slippage_bps_total: Decimal = Decimal("0")
         
         # Quantitative tools
         self.kalman = analysis.KalmanFilter()
@@ -108,6 +110,12 @@ class GridStrategy(StrategyEngine):
         self.running = False
         logger.info(f"Stopping GridStrategy for {self.product_id}")
 
+    def _is_simulated_mode(self) -> bool:
+        return settings.is_simulated_execution()
+
+    def _is_shadow_mode(self) -> bool:
+        return settings.is_shadow_live_execution()
+
     async def _load_state(self):
         """Load active orders from DB on startup."""
         async with AsyncSessionLocal() as session:
@@ -179,7 +187,7 @@ class GridStrategy(StrategyEngine):
         # Here we do a REST poll every cycle (simulated/real)
         
         # If paper trading, simulate fills based on last price
-        if settings.paper_trading_mode:
+        if self._is_simulated_mode():
              await self._simulate_fills()
              return
 
@@ -216,7 +224,13 @@ class GridStrategy(StrategyEngine):
                 filled_ids.append(oid)
         
         for oid in filled_ids:
-            # Add artificial delay or slippage logic here if needed
+            if self._is_shadow_mode():
+                order = self.orders.get(oid)
+                if order and self.last_price > 0:
+                    target_price = Decimal(order["price"])
+                    slippage_bps = abs((self.last_price - target_price) / target_price) * Decimal("10000")
+                    self.shadow_fill_count += 1
+                    self.shadow_slippage_bps_total += slippage_bps
             await self._handle_fill(oid)
 
     async def _handle_fill(self, order_id: str):
@@ -394,11 +408,13 @@ class GridStrategy(StrategyEngine):
              return
 
         try:
-            if settings.paper_trading_mode:
-                client_order_id = f"paper-{uuid.uuid4()}"
+            if self._is_simulated_mode():
+                prefix = "shadow" if self._is_shadow_mode() else "paper"
+                client_order_id = f"{prefix}-{uuid.uuid4()}"
                 # Mimic response
                 response = {"id": client_order_id, "status": "open"}
-                logger.info(f"[PAPER] Simulating {side} order placement: {client_order_id} @ {price}")
+                mode_tag = "SHADOW" if self._is_shadow_mode() else "PAPER"
+                logger.info(f"[{mode_tag}] Simulating {side} order placement: {client_order_id} @ {price}")
             else:
                 # Real API call
                 config = {
@@ -698,7 +714,10 @@ class GridStrategy(StrategyEngine):
             "drawdown_pct": dd["current"] * 100,
             "max_drawdown_pct": dd["max"] * 100,
             "sharpe_ratio": sharpe,
-            "recovery_time_hours": recovery_time
+            "recovery_time_hours": recovery_time,
+            "execution_mode": settings.normalized_execution_mode(),
+            "shadow_fill_count": self.shadow_fill_count,
+            "shadow_avg_slippage_bps": (self.shadow_slippage_bps_total / Decimal(self.shadow_fill_count)) if self.shadow_fill_count > 0 else Decimal("0")
         }
 
     async def _check_rebalance(self, metrics: Dict[str, Any]):
@@ -718,7 +737,7 @@ class GridStrategy(StrategyEngine):
             order_ids = list(self.active_order_ids)
             if order_ids:
                 try:
-                    if not settings.paper_trading_mode:
+                    if not self._is_simulated_mode():
                         await self.exchange.cancel_orders(order_ids)
                     # Clear local state
                     self.orders.clear()
@@ -786,7 +805,7 @@ class GridStrategy(StrategyEngine):
                     self.stop()
                     # Cancel all open orders for this product
                     order_ids = list(self.active_order_ids)
-                    if order_ids:
+                    if order_ids and not self._is_simulated_mode():
                         await self.exchange.cancel_orders(order_ids)
                         # TODO: Market sell inventory if required?
 

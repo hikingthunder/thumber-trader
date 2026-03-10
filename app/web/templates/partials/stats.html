@@ -32,6 +32,17 @@
         <span class="stat-value font-mono">{{ "{:.4f}".format(stats.inventory_base) }}</span>
     </div>
 
+
+    <div class="stat-item">
+        <span class="stat-label">Execution Mode</span>
+        <span class="stat-value font-mono" style="color: var(--accent-color);">{{ execution_mode|upper }}</span>
+    </div>
+
+    <div class="stat-item">
+        <span class="stat-label">Shadow Avg Slippage</span>
+        <span class="stat-value font-mono">{{ "{:.2f}".format(stats.shadow_avg_slippage_bps) if stats.shadow_avg_slippage_bps is defined else "0.00" }} bps</span>
+    </div>
+
     <div class="stat-item">
         <span class="stat-label">Max Drawdown</span>
         <span class="stat-value neg">{{ "{:.2f}%".format(stats.max_drawdown_pct) }}</span>

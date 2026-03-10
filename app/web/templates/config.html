@@ -205,10 +205,19 @@
                         blank if already configured.</div>
                 </div>
                 <div class="config-grid">
+                    <div class="form-group">
+                        <label>Execution Mode</label>
+                        <select name="execution_mode">
+                            <option value="live" {{ 'selected' if settings.normalized_execution_mode() == 'live' }}>Live</option>
+                            <option value="paper" {{ 'selected' if settings.normalized_execution_mode() == 'paper' }}>Paper</option>
+                            <option value="shadow_live" {{ 'selected' if settings.normalized_execution_mode() == 'shadow_live' }}>Shadow Live</option>
+                        </select>
+                        <div class="help-text">Shadow Live uses live market data while simulating order execution (no exchange order POST).</div>
+                    </div>
                     <div class="checkbox-group">
                         <input type="checkbox" id="paper_mode" name="paper_trading_mode" {{ 'checked' if
                             settings.paper_trading_mode }}>
-                        <label for="paper_mode" style="margin: 0;">Paper Trading Mode</label>
+                        <label for="paper_mode" style="margin: 0;">Legacy Paper Flag</label>
                     </div>
                     <div class="checkbox-group">
                         <input type="checkbox" id="auto_start" name="auto_start" {{ 'checked' if settings.auto_start }}>

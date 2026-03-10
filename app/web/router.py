@@ -16,7 +16,7 @@ from sqlalchemy import select, func
 from app.core.manager import manager
 from app.core.backtest import BacktestEngine
 from app.config import settings
-from app.utils.helpers import update_env_file
+from app.utils.helpers import update_env_file, encrypt_value, decrypt_value
 from app.database.db import AsyncSessionLocal
 from app.database.models import Fill, TaxLotMatch, DailyStats, ConfigVersion
 from app.auth.security import get_current_user, log_audit
@@ -53,7 +53,12 @@ def _get_env_text() -> str:
 
 def _save_env_text(snapshot: str) -> None:
     env_path = Path(".env")
-    env_path.write_text(snapshot if snapshot.endswith("\n") or not snapshot else snapshot + "\n")
+    text = snapshot if snapshot.endswith("\n") or not snapshot else snapshot + "\n"
+    env_path.write_text(text)
+    try:
+        env_path.chmod(0o600)
+    except Exception as exc:
+        logger.debug(f"Unable to enforce 0600 on .env during save: {exc}")
 
 
 def _build_change_summary(changed_keys: list[str], rollback_from_id: Optional[int] = None) -> str:
@@ -67,13 +72,14 @@ def _build_change_summary(changed_keys: list[str], rollback_from_id: Optional[in
 
 async def _record_config_version(user, changed_keys: list[str], env_snapshot: str, rollback_from_id: Optional[int] = None):
     actor_name = getattr(user, "username", None) or f"user-{getattr(user, 'id', 'unknown')}"
+    encrypted_snapshot = encrypt_value(env_snapshot)
     record = ConfigVersion(
         created_ts=time.time(),
         actor_user_id=getattr(user, "id", None),
         actor_username=actor_name,
         change_summary=_build_change_summary(changed_keys, rollback_from_id=rollback_from_id),
         changed_keys=json.dumps(sorted(changed_keys)),
-        env_snapshot=env_snapshot,
+        env_snapshot=encrypted_snapshot,
         rollback_from_id=rollback_from_id,
     )
     async with AsyncSessionLocal() as session:
@@ -98,7 +104,8 @@ async def get_dashboard(request: Request, user=Depends(get_current_user)):
     context = {
         "request": request,
         "product_id": settings.product_id,
-        "paper_trading": settings.paper_trading_mode,
+        "paper_trading": settings.is_simulated_execution(),
+        "execution_mode": settings.normalized_execution_mode(),
         "user": user
     }
     return templates.TemplateResponse("index.html", context)
@@ -130,6 +137,10 @@ async def save_config(request: Request, user=Depends(get_current_user)):
     form_data = await request.form()
     updates = {k.upper(): v for k, v in form_data.items() if v and k != "csrf_token"}
 
+    execution_mode = str(form_data.get("execution_mode", "")).strip().lower()
+    if execution_mode in {"live", "paper", "shadow_live"}:
+        updates["EXECUTION_MODE"] = execution_mode
+
     bool_fields = {
         "paper_trading_mode",
         "auto_start",
@@ -148,6 +159,11 @@ async def save_config(request: Request, user=Depends(get_current_user)):
     }
     for field in bool_fields:
         updates[field.upper()] = "true" if field in form_data else "false"
+
+    if execution_mode in {"paper", "shadow_live"}:
+        updates["PAPER_TRADING_MODE"] = "true"
+    elif execution_mode == "live":
+        updates["PAPER_TRADING_MODE"] = "false"
     
     success = update_env_file(updates)
     if success:
@@ -182,7 +198,8 @@ async def rollback_config(request: Request, user=Depends(get_current_user)):
     if target is None:
         return HTMLResponse("<div class='alert alert-danger'>Config version not found.</div>", status_code=404)
 
-    _save_env_text(target.env_snapshot)
+    snapshot_text = decrypt_value(target.env_snapshot)
+    _save_env_text(snapshot_text)
     env_snapshot = _get_env_text()
     changed_keys = json.loads(target.changed_keys) if target.changed_keys else []
     await _record_config_version(user, changed_keys, env_snapshot, rollback_from_id=target.id)
@@ -254,7 +271,8 @@ async def get_dashboard_stats(request: Request, user=Depends(get_current_user)):
         "stats": s,
         "total_realized_pnl": stats.get("total_realized_pnl", 0),
         "total_unrealized_pnl": stats.get("total_unrealized_pnl", 0),
-        "total_fees": total_fees
+        "total_fees": total_fees,
+        "execution_mode": (s.get("execution_mode") if s else settings.normalized_execution_mode())
     }
     return templates.TemplateResponse("partials/stats.html", context)
 
@@ -462,7 +480,8 @@ async def get_export_view(request: Request, user=Depends(get_current_user)):
         "request": request,
         "user": user,
         "product_id": settings.product_id,
-        "paper_trading": settings.paper_trading_mode,
+        "paper_trading": settings.is_simulated_execution(),
+        "execution_mode": settings.normalized_execution_mode(),
         "formats": ["csv", "xlsx", "ods"],
         "tax_methods": ["FIFO", "LIFO", "HIFO"]
     }
