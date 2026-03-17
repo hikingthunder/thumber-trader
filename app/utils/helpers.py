@@ -120,12 +120,25 @@ def decrypt_value(value: str) -> str:
             
     return value
 
+def resolve_env_path() -> Path:
+    """Resolve the writable env file path for config persistence."""
+    configured = os.getenv("THUMBER_ENV_FILE", "").strip()
+    if configured:
+        return Path(configured)
+
+    lxc_path = Path("/etc/thumber-trader/thumber-trader.env")
+    if lxc_path.exists():
+        return lxc_path
+
+    return Path(".env")
+
+
 def update_env_file(updates: dict):
     """
     Update multiple keys in the .env file.
     If a key exists, replace it. If not, append it.
     """
-    env_path = Path(".env")
+    env_path = resolve_env_path()
     if not env_path.exists():
         env_path.touch()
 

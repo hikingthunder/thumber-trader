@@ -7,6 +7,8 @@
     <meta name="theme-color" content="#020617">
     <meta name="description" content="Thumber Trader - Institutional-Grade Crypto Trading Suite">
     <link rel="manifest" href="/static/manifest.json">
+    <link rel="icon" type="image/png" href="/static/branding/favicon.png">
+    <link rel="apple-touch-icon" href="/static/branding/logo-mark.png">
     <title>Thumber Trader</title>
     <!-- HTMX -->
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
@@ -160,6 +162,8 @@
             grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
             gap: 24px;
         }
+
+        .mt-4 { margin-top: 24px; }
 
         .card {
             background: var(--grad-surface);
@@ -353,7 +357,7 @@
                 <h1><i data-lucide="zap"></i> Thumber Trader</h1>
                 {% if paper_trading %}
                 <span class="status-badge status-inactive">
-                    <i data-lucide="test-tube"></i> PAPER MODE
+                    <i data-lucide="test-tube"></i> Paper Mode
                 </span>
                 {% endif %}
             </div>

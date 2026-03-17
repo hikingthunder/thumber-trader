@@ -252,14 +252,16 @@ def calculate_fee_summary(fills: List[Dict[str, Any]]) -> Dict[str, Any]:
     trade_count = len(fills)
     
     for fill in fills:
-        fee = float(fill.get("fee_paid", 0))
+        getter = fill.get if isinstance(fill, dict) else lambda key, default=0: getattr(fill, key, default)
+
+        fee = float(getter("fee_paid", 0) or 0)
         total_fees += fee
         
-        price = float(fill.get("price", 0))
-        size = float(fill.get("base_size", 0))
+        price = float(getter("price", 0) or 0)
+        size = float(getter("base_size", 0) or 0)
         volume = price * size
         
-        side = str(fill.get("side", "")).upper()
+        side = str(getter("side", "") or "").upper()
         if side == "BUY":
             total_buy_volume += volume
         elif side == "SELL":
@@ -336,4 +338,3 @@ def map_to_accounting(data: List[Dict[str, Any]], type: str) -> List[Dict[str, A
                 "Realized PnL": row.get("realized_pnl_usd")
             })
     return mapped
-

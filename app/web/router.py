@@ -3,7 +3,6 @@ import io
 import json
 import time
 import psutil
-from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
@@ -16,7 +15,7 @@ from sqlalchemy import select, func
 from app.core.manager import manager
 from app.core.backtest import BacktestEngine
 from app.config import settings, Settings
-from app.utils.helpers import update_env_file, encrypt_value, decrypt_value
+from app.utils.helpers import update_env_file, encrypt_value, decrypt_value, resolve_env_path
 from app.database.db import AsyncSessionLocal
 from app.database.models import Fill, TaxLotMatch, DailyStats, ConfigVersion
 from app.auth.security import get_current_user, log_audit
@@ -45,14 +44,14 @@ def _require_admin(user) -> None:
 
 
 def _get_env_text() -> str:
-    env_path = Path(".env")
+    env_path = resolve_env_path()
     if not env_path.exists():
         return ""
     return env_path.read_text()
 
 
 def _save_env_text(snapshot: str) -> None:
-    env_path = Path(".env")
+    env_path = resolve_env_path()
     text = snapshot if snapshot.endswith("\n") or not snapshot else snapshot + "\n"
     env_path.write_text(text)
     try:
@@ -173,7 +172,15 @@ async def save_config(request: Request, user=Depends(get_current_user)):
     elif execution_mode == "live":
         updates["PAPER_TRADING_MODE"] = "false"
     
-    success = update_env_file(updates)
+    try:
+        success = update_env_file(updates)
+    except PermissionError:
+        logger.exception("Configuration save failed due to env file permissions")
+        env_path = resolve_env_path()
+        return HTMLResponse(
+            f"<div class='alert alert-danger'>Failed to save configuration: permission denied for {env_path}. Update file ownership/permissions for the runtime user.</div>",
+            status_code=500,
+        )
     if success:
         env_snapshot = _get_env_text()
         await _record_config_version(user, list(updates.keys()), env_snapshot)
@@ -533,6 +540,8 @@ async def generate_export(request: Request, user=Depends(get_current_user)):
         }
 
     output = export_data(data, file_format)
+    if isinstance(output, str):
+        output = output.encode("utf-8")
     await log_audit(user.id, "data_export", f"Format: {file_format}, Method: {tax_method}", _client_ip(request))
     
     media_types = {
