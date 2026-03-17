@@ -5,10 +5,10 @@
 <div class="dashboard-top-grid">
     <!-- TradingView Lightweight Chart -->
     <div class="card" style="min-height: 400px; --i: 1;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-            <div style="display:flex; align-items:center; gap:12px;">
-                <h2 style="margin: 0;"><i data-lucide="candlestick-chart"></i> {{ product_id }} Live Market</h2>
-                <select id="chart-type" style="background:#020617; color:var(--text-color); border:1px solid var(--border-color); border-radius:8px; padding:6px 10px;">
+        <div class="chart-toolbar">
+            <div class="chart-toolbar-left">
+                <h2 class="chart-title"><i data-lucide="candlestick-chart"></i> {{ product_id }} Live Market</h2>
+                <select id="chart-type" class="chart-type-select">
                     <option value="area">Line/Area</option>
                     <option value="candlestick">Japanese Candlestick</option>
                     <option value="ohlc">OHLC Bars</option>
@@ -21,8 +21,7 @@
                     <option value="line">Line</option>
                 </select>
             </div>
-            <div id="chart-price" class="font-mono"
-                style="font-size: 1.5rem; font-weight: 800; color: var(--accent-color); background: rgba(56, 189, 248, 0.1); padding: 4px 12px; border-radius: 8px;">—</div>
+            <div id="chart-price" class="font-mono chart-price">—</div>
         </div>
         <div id="chart" style="width: 100%; height: 320px;"></div>
         <div id="chart-type-note" class="help-text" style="margin-top:8px;"></div>
@@ -104,7 +103,7 @@
     <!-- Market Depth [RESTORED/REFINED] -->
     <div class="card" style="--i: 7; grid-column: span 1;">
         <h2><i data-lucide="waves"></i> Order Book Depth</h2>
-        <div style="position: relative; height: 160px; background: rgba(0,0,0,0.2); border-radius: 12px; overflow: hidden; margin-top: 10px; border: 1px solid var(--border-color);">
+        <div class="depth-chart-wrap">
             <canvas id="depth-canvas" style="width: 100%; height: 100%;"></canvas>
         </div>
     </div>
@@ -352,8 +351,60 @@
         .dashboard-top-grid {
             grid-template-columns: 1fr;
         }
+        .chart-toolbar {
+            flex-direction: column;
+            align-items: stretch;
+        }
+        .chart-toolbar-left {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 8px;
+        }
+        .chart-type-select {
+            max-width: 100%;
+            width: 100%;
+        }
+        .chart-price {
+            font-size: 1.2rem;
+            text-align: center;
+            width: 100%;
+        }
+        .depth-chart-wrap {
+            height: 180px;
+        }
     }
 
+    .chart-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .chart-toolbar-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .chart-title { margin: 0; overflow-wrap: anywhere; }
+    .chart-type-select {
+        background: #020617;
+        color: var(--text-color);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 6px 10px;
+        max-width: 170px;
+    }
+    .chart-price {
+        font-size: 1.5rem;
+        font-weight: 800;
+        color: var(--accent-color);
+        background: rgba(56, 189, 248, 0.1);
+        padding: 4px 12px;
+        border-radius: 8px;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .depth-chart-wrap {
+        position: relative;
+        height: 160px;
+        background: rgba(0,0,0,0.2);
+        border-radius: 12px;
+        overflow: hidden;
+        margin-top: 10px;
+        border: 1px solid var(--border-color);
+    }
     .pulse-error { animation: pulseBg 2s infinite; border-color: var(--danger-color) !important; }
     @keyframes pulseBg {
         0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }

@@ -7,8 +7,11 @@
     <meta name="theme-color" content="#020617">
     <meta name="description" content="Thumber Trader - Institutional-Grade Crypto Trading Suite">
     <link rel="manifest" href="/static/manifest.json">
-    <link rel="icon" type="image/png" href="/static/branding/favicon.png">
-    <link rel="apple-touch-icon" href="/static/branding/logo-mark.png">
+    <link rel="icon" type="image/x-icon" sizes="16x16" href="/static/branding/favicon16.ico">
+    <link rel="icon" type="image/x-icon" sizes="32x32" href="/static/branding/favicon32.ico">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/branding/favicon192.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/branding/favicon180.png">
+    
     <title>Thumber Trader</title>
     <!-- HTMX -->
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
@@ -340,8 +343,13 @@
         /* Responsive */
         @media (max-width: 768px) {
             body { padding: 12px; }
-            header { flex-direction: column; align-items: flex-start; }
-            nav { width: 100%; overflow-x: auto; }
+            header { flex-direction: column; align-items: stretch; padding: 14px; }
+            .header-left { justify-content: space-between; width: 100%; }
+            nav { width: 100%; overflow-x: visible; gap: 8px; }
+            nav a { flex: 1 1 calc(50% - 8px); justify-content: center; padding: 10px 12px; }
+            nav .nav-divider { display: none; }
+            .user-badge { width: 100%; justify-content: center; }
+            .btn.btn-sm { flex: 1 1 calc(50% - 8px); }
             .dashboard-grid { grid-template-columns: 1fr; }
             .card { grid-column: span 1 !important; }
             h1 { font-size: 1.25rem; }

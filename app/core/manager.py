@@ -274,7 +274,9 @@ class StrategyManager:
 
     async def _handle_ws_l2(self, event: Dict[str, Any]):
         """Handle L2 book updates and broadcast density to dashboard."""
-        product_id = event.get("product_id")
+        events = event.get("events", [])
+        first_event = events[0] if events else event
+        product_id = first_event.get("product_id") or event.get("product_id")
         # For simplicity, we only broadcast a snapshot of density if it's an update
         # L2 messages come fast, so we throttle broadcast to 1 per second
         now = time.time()
@@ -297,11 +299,11 @@ class StrategyManager:
         # Extract snapshots (simplified)
         # Note: In a production system, we'd maintain the full book.
         # Here we just take the first few levels from the current event.
-        ev_data = first_event
-        updates = ev_data.get("updates", [])
-        
-        bids = [[u["price_level"], u["new_quantity"]] for u in updates if u["side"] == "bid"]
-        asks = [[u["price_level"], u["new_quantity"]] for u in updates if u["side"] == "offer"]
+        updates = first_event.get("updates", [])
+        bids = [[u.get("price_level"), u.get("new_quantity")] for u in updates if u.get("side") == "bid"]
+        asks = [[u.get("price_level"), u.get("new_quantity")] for u in updates if u.get("side") in {"offer", "ask"}]
+        bids = [lvl for lvl in bids if lvl[0] is not None and lvl[1] is not None]
+        asks = [lvl for lvl in asks if lvl[0] is not None and lvl[1] is not None]
         
         if not bids and not asks:
             return

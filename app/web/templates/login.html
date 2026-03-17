@@ -22,6 +22,19 @@
         margin-bottom: 36px;
     }
 
+    .auth-branding {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+    }
+
+    .auth-branding img {
+        max-width: min(220px, 70%);
+        height: auto;
+    }
+
     .auth-header h1 {
         font-size: 2rem;
         margin-bottom: 8px;
@@ -149,8 +162,12 @@
 <div class="auth-container">
     <div class="auth-card">
         <div class="auth-header">
+            <div class="auth-branding">
+                <img src="/static/branding/logo.png" alt="Thumber Trader logo">
+                <img src="/static/branding/title.png" alt="Thumber Trader" aria-hidden="true">
+            </div>
             <div class="lock-icon">🔐</div>
-            <h1>Thumber Trader</h1>
+            <h1 style="font-size:1.35rem;">Secure Sign In</h1>
             {% if show_register %}
             <p>Create your admin account to get started</p>
             {% elif show_totp %}
