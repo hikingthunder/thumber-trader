@@ -54,3 +54,6 @@ secrets.*
 *.secrets
 .env.*
 !.env.example
+
+# Working folder for issues
+docs/working_issues/
