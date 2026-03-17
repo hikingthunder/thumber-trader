@@ -35,6 +35,8 @@ class StrategyManager:
         self.last_balance_refresh_ts: float = 0.0
         self.last_ticker_ts: float = 0.0
         self.last_exchange_error: Optional[str] = None
+        self.last_depth_payload: Dict[str, Any] = {}
+        self.last_depth_ts: float = 0.0
 
     async def initialize(self):
         """Initialize connections and strategies."""
@@ -276,51 +278,62 @@ class StrategyManager:
         """Handle L2 book updates and broadcast density to dashboard."""
         events = event.get("events", [])
         first_event = events[0] if events else event
-        product_id = first_event.get("product_id") or event.get("product_id")
-        # For simplicity, we only broadcast a snapshot of density if it's an update
-        # L2 messages come fast, so we throttle broadcast to 1 per second
+        product_id = first_event.get("product_id") or event.get("product_id") or settings.product_id
+
         now = time.time()
         if not hasattr(self, "_last_l2_broadcast"):
             self._last_l2_broadcast = 0
-            
         if now - self._last_l2_broadcast < 1.0:
             return
-            
         self._last_l2_broadcast = now
-        
-        # Calculate density using metrics helper
+
         from app.core import metrics as quant_metrics
         from app.core import analysis
-        
+
         strategy = self.strategies.get(product_id)
         if not strategy or strategy.last_price == 0:
             return
-            
-        # Extract snapshots (simplified)
-        # Note: In a production system, we'd maintain the full book.
-        # Here we just take the first few levels from the current event.
-        updates = first_event.get("updates", [])
-        bids = [[u.get("price_level"), u.get("new_quantity")] for u in updates if u.get("side") == "bid"]
-        asks = [[u.get("price_level"), u.get("new_quantity")] for u in updates if u.get("side") in {"offer", "ask"}]
-        bids = [lvl for lvl in bids if lvl[0] is not None and lvl[1] is not None]
-        asks = [lvl for lvl in asks if lvl[0] is not None and lvl[1] is not None]
-        
+
+        updates = []
+        for evt in events or [first_event]:
+            updates.extend(evt.get("updates", []))
+
+        def _extract_price_qty(update: Dict[str, Any]):
+            price = update.get("price_level", update.get("price"))
+            qty = update.get("new_quantity", update.get("quantity", update.get("size", update.get("qty"))))
+            return price, qty
+
+        bids = []
+        asks = []
+        for update in updates:
+            side = str(update.get("side", "")).strip().lower()
+            price, qty = _extract_price_qty(update)
+            if price is None or qty is None:
+                continue
+            level = [price, qty]
+            if side in {"bid", "bids", "buy"}:
+                bids.append(level)
+            elif side in {"offer", "ask", "asks", "sell"}:
+                asks.append(level)
+
         if not bids and not asks:
             return
-            
+
         try:
             density = quant_metrics.get_order_book_density(bids, asks, strategy.last_price)
-            
-            # Also include VPIN
             vpin_val = analysis.vpin(strategy.candles)
-            
-            from app.web.ws_router import browser_ws_manager
-            await browser_ws_manager.broadcast({
+            payload = {
                 "type": "depth",
                 "product_id": product_id,
                 "density": density,
-                "vpin": float(vpin_val)
-            })
+                "vpin": float(vpin_val),
+                "time": now,
+            }
+            self.last_depth_payload[product_id] = payload
+            self.last_depth_ts = now
+
+            from app.web.ws_router import browser_ws_manager
+            await browser_ws_manager.broadcast(payload)
         except Exception as e:
             logger.error(f"Error during L2 broadcast: {e}")
 

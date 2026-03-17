@@ -136,6 +136,7 @@
     let chart, activeSeries;
     let selectedChartType = localStorage.getItem('thumber_chart_type') || 'area';
     let lastBar = null;
+    let historicalBars = [];
 
     function buildHeikinAshi(bar, prevHA) {
         const haClose = (bar.open + bar.high + bar.low + bar.close) / 4;
@@ -148,13 +149,98 @@
             close: haClose,
         };
     }
+    function getBoxSize(series) {
+        if (!series.length) return 1;
+        const closes = series.map(b => b.close);
+        const mean = closes.reduce((a, b) => a + b, 0) / closes.length;
+        const variance = closes.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / closes.length;
+        const std = Math.sqrt(variance);
+        return Math.max(std * 0.35, mean * 0.001);
+    }
+
+    function transformSpecialSeries(type, bars) {
+        if (!bars.length) return [];
+        if (type === 'line_break') {
+            const out = [];
+            for (const bar of bars) {
+                if (out.length < 3) {
+                    out.push({ time: bar.time, value: bar.close });
+                    continue;
+                }
+                const last3 = out.slice(-3).map(x => x.value);
+                const max3 = Math.max(...last3);
+                const min3 = Math.min(...last3);
+                if (bar.close > max3 || bar.close < min3) out.push({ time: bar.time, value: bar.close });
+            }
+            return out;
+        }
+        if (type === 'renko') {
+            const box = getBoxSize(bars);
+            const out = [];
+            let brick = bars[0].close;
+            for (const bar of bars) {
+                while (Math.abs(bar.close - brick) >= box) {
+                    brick += bar.close > brick ? box : -box;
+                    out.push({ time: bar.time, value: brick });
+                }
+            }
+            return out;
+        }
+        if (type === 'kagi') {
+            const threshold = getBoxSize(bars);
+            const out = [{ time: bars[0].time, value: bars[0].close }];
+            let line = bars[0].close;
+            let dir = 0;
+            for (const bar of bars.slice(1)) {
+                const delta = bar.close - line;
+                if (Math.abs(delta) < threshold) continue;
+                const nextDir = delta > 0 ? 1 : -1;
+                if (dir === 0 || nextDir !== dir) dir = nextDir;
+                line = bar.close;
+                out.push({ time: bar.time, value: line });
+            }
+            return out;
+        }
+        if (type === 'point_figure') {
+            const box = getBoxSize(bars);
+            const out = [];
+            let col = bars[0].close;
+            let dir = 0;
+            for (const bar of bars) {
+                const move = bar.close - col;
+                if (dir >= 0 && move >= box) {
+                    col += box;
+                    dir = 1;
+                    out.push({ time: bar.time, value: col });
+                } else if (dir <= 0 && move <= -box) {
+                    col -= box;
+                    dir = -1;
+                    out.push({ time: bar.time, value: col });
+                }
+            }
+            return out;
+        }
+        if (type === 'raindrop') {
+            return bars.map((bar) => {
+                const body = bar.close - bar.open;
+                const range = Math.max(bar.high - bar.low, 1e-9);
+                const pressure = body / range;
+                return { time: bar.time, value: bar.close + pressure * range * 0.15 };
+            });
+        }
+        return bars.map(bar => ({ time: bar.time, value: bar.close }));
+    }
+
 
     function chartTypeInfo(type) {
-        const fallback = ['line_break', 'renko', 'kagi', 'point_figure', 'raindrop'];
-        if (fallback.includes(type)) {
-            return 'Using line-style approximation for this chart family in this release.';
-        }
-        return '';
+        const notes = {
+            line_break: 'Line Break built from reversal-confirmed closes.',
+            renko: 'Renko is rendered using adaptive box size from recent volatility.',
+            kagi: 'Kagi line flips only after meaningful reversal threshold moves.',
+            point_figure: 'Point & Figure uses fixed-column breakout approximation.',
+            raindrop: 'Raindrop approximates intrabar buying/selling pressure from candle structure.'
+        };
+        return notes[type] || '';
     }
 
     function createSeries(type) {
@@ -169,7 +255,7 @@
             });
         } else if (type === 'ohlc') {
             activeSeries = chart.addBarSeries({ upColor: '#10b981', downColor: '#ef4444' });
-        } else if (type === 'line') {
+        } else if (['line_break', 'renko', 'kagi', 'point_figure', 'raindrop', 'line'].includes(type)) {
             activeSeries = chart.addLineSeries({ color: '#38bdf8', lineWidth: 2 });
         } else {
             activeSeries = chart.addAreaSeries({
@@ -177,6 +263,25 @@
             });
         }
         chartTypeNote.textContent = chartTypeInfo(type);
+        renderSeriesData();
+    }
+
+    function renderSeriesData() {
+        if (!activeSeries || !historicalBars.length) return;
+        if (selectedChartType === 'candlestick' || selectedChartType === 'ohlc') {
+            activeSeries.setData(historicalBars);
+        } else if (selectedChartType === 'heikin_ashi') {
+            const haData = [];
+            let prevHA = null;
+            for (const bar of historicalBars) {
+                const ha = buildHeikinAshi(bar, prevHA);
+                haData.push(ha);
+                prevHA = ha;
+            }
+            activeSeries.setData(haData);
+        } else {
+            activeSeries.setData(transformSpecialSeries(selectedChartType, historicalBars));
+        }
     }
 
     if (chartContainer) {
@@ -279,14 +384,14 @@
                     lastBar.low = Math.min(lastBar.low, data.price);
                     lastBar.close = data.price;
                 }
-                if (selectedChartType === 'candlestick' || selectedChartType === 'ohlc') {
-                    activeSeries.update(lastBar);
-                } else if (selectedChartType === 'heikin_ashi') {
-                    const ha = buildHeikinAshi(lastBar);
-                    activeSeries.update(ha);
+                const barCopy = { ...lastBar };
+                if (!historicalBars.length || historicalBars[historicalBars.length - 1].time !== barCopy.time) {
+                    historicalBars.push(barCopy);
                 } else {
-                    activeSeries.update({ time: data.time, value: data.price });
+                    historicalBars[historicalBars.length - 1] = barCopy;
                 }
+                if (historicalBars.length > 500) historicalBars = historicalBars.slice(-500);
+                renderSeriesData();
                 document.getElementById('chart-price').textContent = '$' + data.price.toLocaleString();
             }
             if (data.type === 'depth') updateDepth(data);
@@ -332,10 +437,20 @@
         });
     }
 
+    async function pollDepth() {
+        try {
+            const resp = await fetch('/dashboard/depth');
+            const data = await resp.json();
+            updateDepth(data);
+        } catch (e) {}
+    }
+
     // Init
     initPerfChart();
     setInterval(updateHealth, 5000);
+    setInterval(pollDepth, 3000);
     updateHealth();
+    pollDepth();
     connectWS();
 </script>
 

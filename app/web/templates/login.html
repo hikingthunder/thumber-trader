@@ -131,11 +131,6 @@
         margin-bottom: 12px;
     }
 
-    .lock-icon {
-        font-size: 3rem;
-        margin-bottom: 4px;
-    }
-
     @keyframes shake {
 
         0%,
@@ -163,11 +158,9 @@
     <div class="auth-card">
         <div class="auth-header">
             <div class="auth-branding">
-                <img src="/static/branding/logo.png" alt="Thumber Trader logo">
-                <img src="/static/branding/title.png" alt="Thumber Trader" aria-hidden="true">
+                <img src="/static/branding/branding.png" alt="Thumber Trader branding">
             </div>
-            <div class="lock-icon">🔐</div>
-            <h1 style="font-size:1.35rem;">Secure Sign In</h1>
+            <h1 style="font-size:1.35rem; text-align: center;">Secure Sign In</h1>
             {% if show_register %}
             <p>Create your admin account to get started</p>
             {% elif show_totp %}

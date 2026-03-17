@@ -10,7 +10,7 @@ Institutional-style grid trading bot with FastAPI dashboard, strategy controls, 
 - VPIN toxicity controls and risk guardrails
 - Web dashboard with:
   - auth (register/login/session) + audit log filtering + branded login experience from `static/branding` assets
-  - runtime stats, fills widgets, and multi-style live market charts (line/area, candlestick, OHLC, Heikin Ashi + additional chart-mode fallbacks)
+  - runtime stats, fills widgets, and multi-style live market charts (line/area, candlestick, OHLC, Heikin Ashi, Line Break, Renko, Kagi, Point & Figure, Raindrop)
   - config editor that writes to `.env` with encrypted version history + rollback, hover descriptions, and inline recommended defaults
   - account & security page for username/password updates and 2FA management
   - backtest page
