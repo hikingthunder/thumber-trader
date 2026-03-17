@@ -9,7 +9,7 @@ Institutional-style grid trading bot with FastAPI dashboard, strategy controls, 
 - Alpha fusion controls (RSI, MACD, imbalance weighting)
 - VPIN toxicity controls and risk guardrails
 - Web dashboard with:
-  - auth (register/login/session) + audit log filtering
+  - auth (register/login/session) + audit log filtering + branded login experience from `static/branding` assets
   - runtime stats, fills widgets, and multi-style live market charts (line/area, candlestick, OHLC, Heikin Ashi + additional chart-mode fallbacks)
   - config editor that writes to `.env` with encrypted version history + rollback, hover descriptions, and inline recommended defaults
   - account & security page for username/password updates and 2FA management
@@ -19,6 +19,13 @@ Institutional-style grid trading bot with FastAPI dashboard, strategy controls, 
 - TradingView webhook endpoint for pause/resume/kill actions
 - Prometheus-style metrics endpoint (`/metrics`)
 - Docker + Compose + Podman workflows
+
+---
+
+## Branding assets
+
+Place logo/title/favicon files under `static/branding/`.
+The app now serves this directory at `/static/branding` and uses those assets for login-page branding + favicon/manifest icons.
 
 ---
 

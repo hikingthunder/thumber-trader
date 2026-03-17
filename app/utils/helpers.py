@@ -194,3 +194,5 @@ def update_env_file(updates: dict):
     except Exception as exc:
         # Best effort for permissions
         logging.debug(f"Unable to enforce 0600 permissions on .env: {exc}")
+
+    return True

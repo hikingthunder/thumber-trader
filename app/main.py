@@ -111,6 +111,9 @@ app.include_router(webhook_router)
 
 # --- Static Files ---
 static_dir = os.path.join(os.path.dirname(__file__), "static")
+branding_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "branding")
+if os.path.isdir(branding_dir):
+    app.mount("/static/branding", StaticFiles(directory=branding_dir), name="branding")
 if os.path.isdir(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
