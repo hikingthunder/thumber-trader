@@ -152,6 +152,18 @@ What it does:
 - creates `/etc/thumber-trader/thumber-trader.env` if missing
 - installs and enables `thumber-trader.service` (runs as dedicated non-root `thumber` user)
 
+### Proxmox Debian LXC one-line updater
+
+```bash
+bash -lc "$(curl -fsSL https://raw.githubusercontent.com/hikingthunder/thumber-trader/main/scripts/update_lxc.sh)"
+```
+
+What it does:
+- adds `/opt/thumber-trader` as a trusted git directory for the runtime user
+- fetches + fast-forwards repository updates
+- upgrades Python dependencies in the project virtualenv
+- reloads systemd units and restarts `thumber-trader.service`
+
 ---
 
 ## Container usage
@@ -222,6 +234,13 @@ If you deployed with `scripts/install_lxc.sh`, update as:
 
 ```bash
 sudo bash /opt/thumber-trader/scripts/update_lxc.sh
+```
+
+If config saves fail due to permissions, ensure the runtime user can write the env file used by the service:
+
+```bash
+sudo chown thumber:thumber /etc/thumber-trader/thumber-trader.env
+sudo chmod 600 /etc/thumber-trader/thumber-trader.env
 ```
 
 (Manual equivalent)

@@ -36,9 +36,10 @@
     <div class="stat-item">
         <span class="stat-label">Execution Mode</span>
         {% set sim_mode = execution_mode in ['paper', 'shadow_live'] %}
+        {% set mode_label = {'paper':'Paper Mode','shadow_live':'Shadow Live','live':'Live'}[execution_mode] if execution_mode in ['paper','shadow_live','live'] else execution_mode|replace('_',' ')|title %}
         <span class="status-badge {{ 'status-inactive' if sim_mode else 'status-active' }}" style="width: fit-content; font-size: 0.75rem; padding: 4px 8px;">
             <i data-lucide="{{ 'test-tube' if sim_mode else 'shield-check' }}"></i>
-            {{ execution_mode|upper }}
+            {{ mode_label }}
         </span>
     </div>
 

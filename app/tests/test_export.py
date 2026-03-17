@@ -1,6 +1,6 @@
 
 import unittest
-from app.utils.export import export_data, models_to_dicts, map_to_accounting, get_accounting_headers
+from app.utils.export import export_data, models_to_dicts, map_to_accounting, get_accounting_headers, calculate_fee_summary
 from datetime import datetime
 
 class TestExportUtility(unittest.TestCase):
@@ -70,6 +70,22 @@ class TestExportUtility(unittest.TestCase):
         content = export_data(workbook_data, "csv")
         self.assertIsInstance(content, bytes)
         self.assertIn(b"a,b", content)
+
+    def test_calculate_fee_summary_with_model_objects(self):
+        class FillModel:
+            def __init__(self, fee_paid, price, base_size, side):
+                self.fee_paid = fee_paid
+                self.price = price
+                self.base_size = base_size
+                self.side = side
+
+        fills = [
+            FillModel(1.0, 100.0, 1.0, "BUY"),
+            FillModel(2.0, 200.0, 0.5, "SELL"),
+        ]
+        summary = calculate_fee_summary(fills)
+        self.assertEqual(summary["total_fees_usd"], 3.0)
+        self.assertEqual(summary["trade_count"], 2)
 
 if __name__ == '__main__':
     unittest.main()

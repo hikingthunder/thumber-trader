@@ -6,7 +6,7 @@ from typing import Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, RedirectResponse
 from starlette.datastructures import MutableHeaders
 from sqlalchemy import select
 
@@ -259,6 +259,17 @@ class CSRFMiddleware:
 
         if not submitted_token or submitted_token != cookie_token:
             logger.warning(f"CSRF failure: Invalid token for {request.url.path}")
+            if request.url.path in {"/auth/login", "/auth/register"}:
+                from app.auth.security import generate_csrf_token
+                response = RedirectResponse(url="/auth/login", status_code=303)
+                response.set_cookie(
+                    key=CSRF_COOKIE_NAME,
+                    value=generate_csrf_token(),
+                    samesite="lax",
+                    secure=request.url.scheme == "https",
+                )
+                await response(scope, receive, send)
+                return
             response = JSONResponse({"detail": "CSRF token invalid or missing"}, status_code=403)
             await response(scope, receive, send)
             return

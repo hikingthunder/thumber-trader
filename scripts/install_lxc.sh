@@ -50,11 +50,11 @@ else
   echo "STATE_DB_PATH=\"$DB_FILE\"" >> "$ENV_FILE"
 fi
 
-chown -R root:root "$APP_DIR"
+chown -R "$APP_USER:$APP_GROUP" "$APP_DIR"
 chown "$APP_USER:$APP_GROUP" "$DATA_DIR"
 chmod 750 "$DATA_DIR"
-chown root:"$APP_GROUP" "$ENV_FILE"
-chmod 640 "$ENV_FILE"
+chown "$APP_USER:$APP_GROUP" "$ENV_FILE"
+chmod 600 "$ENV_FILE"
 
 cat > "$SERVICE_FILE" <<UNIT
 [Unit]
@@ -68,6 +68,7 @@ User=$APP_USER
 Group=$APP_GROUP
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
+Environment=THUMBER_ENV_FILE=$ENV_FILE
 ExecStart=$APP_DIR/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=5

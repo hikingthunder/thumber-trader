@@ -27,6 +27,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 
 echo "[1/5] Updating repository..."
+sudo -u "$APP_USER" git config --global --add safe.directory "$APP_DIR" || true
 sudo -u "$APP_USER" git -C "$APP_DIR" fetch --all --prune
 sudo -u "$APP_USER" git -C "$APP_DIR" pull --ff-only
 

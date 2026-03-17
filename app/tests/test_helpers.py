@@ -34,11 +34,9 @@ def test_update_env_file_encryption():
     if "APP_ENV_ENC_KEY" in os.environ:
         del os.environ["APP_ENV_ENC_KEY"]
         
-    test_env = Path(".env")
-    if test_env.exists():
-        test_env_bak = test_env.read_text()
-    else:
-        test_env_bak = ""
+    tmp_dir = tempfile.TemporaryDirectory()
+    test_env = Path(tmp_dir.name) / ".env"
+    os.environ["THUMBER_ENV_FILE"] = str(test_env)
         
     try:
         # Initial write
@@ -50,4 +48,5 @@ def test_update_env_file_encryption():
         assert "my_api_key" not in content
         
     finally:
-        test_env.write_text(test_env_bak)
+        os.environ.pop("THUMBER_ENV_FILE", None)
+        tmp_dir.cleanup()

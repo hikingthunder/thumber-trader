@@ -245,7 +245,9 @@ class StrategyManager:
 
     async def _handle_ws_fill(self, event: Dict[str, Any]):
         """Route WS fill event to strategy and broadcast to browser."""
-        product_id = event.get("product_id")
+        events = event.get("events", [])
+        first_event = events[0] if events else {}
+        product_id = first_event.get("product_id") or event.get("product_id")
         if product_id in self.strategies:
             await self.strategies[product_id].on_ws_fill(event)
             
@@ -295,7 +297,7 @@ class StrategyManager:
         # Extract snapshots (simplified)
         # Note: In a production system, we'd maintain the full book.
         # Here we just take the first few levels from the current event.
-        ev_data = event.get("events", [{}])[0]
+        ev_data = first_event
         updates = ev_data.get("updates", [])
         
         bids = [[u["price_level"], u["new_quantity"]] for u in updates if u["side"] == "bid"]
