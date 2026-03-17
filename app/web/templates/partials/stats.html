@@ -29,7 +29,7 @@
 
     <div class="stat-item">
         <span class="stat-label">Inventory ({{ product_id.split('-')[0] if product_id else '' }})</span>
-        <span class="stat-value font-mono">{{ "{:.4f}".format(stats.inventory_base) }}</span>
+        <span class="stat-value font-mono">{{ "{:.4f}".format(stats.inventory_base|default(0)) }}</span>
     </div>
 
 
@@ -50,12 +50,12 @@
 
     <div class="stat-item">
         <span class="stat-label">Max Drawdown</span>
-        <span class="stat-value neg">{{ "{:.2f}%".format(stats.max_drawdown_pct) }}</span>
+        <span class="stat-value neg">{{ "{:.2f}%".format(stats.max_drawdown_pct|default(0)) }}</span>
     </div>
 
     <div class="stat-item">
         <span class="stat-label">Sharpe Ratio</span>
-        <span class="stat-value" style="color: var(--accent-color);">{{ "{:.2f}".format(stats.sharpe_ratio) }}</span>
+        <span class="stat-value" style="color: var(--accent-color);">{{ "{:.2f}".format(stats.sharpe_ratio|default(0)) }}</span>
     </div>
 </div>
 
@@ -64,6 +64,28 @@
     <span style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">
         Bot {{ "Active" if running else "Paused" }}
     </span>
+</div>
+
+
+<div style="margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-color); display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+    <div class="stat-item">
+        <span class="stat-label">Base Balance</span>
+        <span class="stat-value font-mono">{{ "{:.6f}".format(base_balance) }}</span>
+    </div>
+    <div class="stat-item">
+        <span class="stat-label">Quote Balance</span>
+        <span class="stat-value font-mono">${{ "{:,.2f}".format(quote_balance) }}</span>
+    </div>
+    <div class="stat-item">
+        <span class="stat-label">Last Price</span>
+        <span class="stat-value font-mono">${{ "{:,.2f}".format(last_price) }}</span>
+    </div>
+    <div class="stat-item">
+        <span class="stat-label">Exchange Feed</span>
+        <span class="status-badge {{ 'status-active' if exchange_health.exchange_connected else 'status-inactive' }}" style="width: fit-content; font-size: 0.75rem; padding: 4px 8px;">
+            {{ 'Connected' if exchange_health.exchange_connected else 'Offline' }}
+        </span>
+    </div>
 </div>
 
 <style>

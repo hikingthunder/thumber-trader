@@ -181,6 +181,12 @@ async def save_config(request: Request, user=Depends(get_current_user)):
             f"<div class='alert alert-danger'>Failed to save configuration: permission denied for {env_path}. Update file ownership/permissions for the runtime user.</div>",
             status_code=500,
         )
+    except Exception as exc:
+        logger.exception("Configuration save failed due to unexpected error")
+        return HTMLResponse(
+            f"<div class='alert alert-danger'>Failed to save configuration: {type(exc).__name__}. Check server logs for details.</div>",
+            status_code=500,
+        )
     if success:
         env_snapshot = _get_env_text()
         await _record_config_version(user, list(updates.keys()), env_snapshot)
@@ -280,6 +286,9 @@ async def get_dashboard_stats(request: Request, user=Depends(get_current_user)):
     strat_id = next(iter(stats["strategies"]), None)
     s = stats["strategies"].get(strat_id, {}) if strat_id else {}
     
+    balances = stats.get("balances", {})
+    product_symbol = (strat_id or settings.product_id).split("-")[0]
+    quote_symbol = (strat_id or settings.product_id).split("-")[-1]
     context = {
         "request": request,
         "running": stats.get("running", False),
@@ -288,7 +297,11 @@ async def get_dashboard_stats(request: Request, user=Depends(get_current_user)):
         "total_realized_pnl": stats.get("total_realized_pnl", 0),
         "total_unrealized_pnl": stats.get("total_unrealized_pnl", 0),
         "total_fees": total_fees,
-        "execution_mode": (s.get("execution_mode") if s else settings.normalized_execution_mode())
+        "execution_mode": (s.get("execution_mode") if s else settings.normalized_execution_mode()),
+        "base_balance": float(balances.get(product_symbol, 0) or 0),
+        "quote_balance": float(balances.get(quote_symbol, 0) or 0),
+        "last_price": float(s.get("last_price", 0) or 0),
+        "exchange_health": manager.get_exchange_health(),
     }
     return templates.TemplateResponse("partials/stats.html", context)
 
@@ -459,6 +472,17 @@ async def get_recent_audit_events(request: Request, user=Depends(get_current_use
         </div>
         """)
     return "".join(items)
+
+
+
+
+@router.get("/dashboard/depth")
+async def get_dashboard_depth(user=Depends(get_current_user)):
+    """Return latest cached order-book depth payload for fallback polling."""
+    payload = manager.last_depth_payload.get(settings.product_id)
+    if payload:
+        return payload
+    return {"type": "depth", "product_id": settings.product_id, "density": [], "vpin": 0.0, "time": 0}
 
 
 @router.get("/dashboard/price")
