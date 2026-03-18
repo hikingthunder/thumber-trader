@@ -24,8 +24,8 @@ Also include migration notes, security sign-off, and validation command outputs 
 - Status: `in_progress`
 - Owner: `Core Trading Engine Agent`
 - Target milestone: `v2.0.1`
-- PR link(s): `current shadow-mode wiring commit`
-- Last updated: `2026-03-10`
+- PR link(s): `current shadow-mode wiring commit`, `shadow-order-safety regression tests`
+- Last updated: `2026-03-18`
 
 **Scope:**
 - `app/core/engine.py`, `app/core/manager.py`, `app/core/sor.py`, `app/core/exchange.py`
@@ -38,7 +38,7 @@ Also include migration notes, security sign-off, and validation command outputs 
 - [x] Ensure no exchange order POST path can execute in shadow mode.
 - [ ] Persist decision-time order book snapshots for simulated fills.
 - [x] Add simulated vs theoretical fill-quality metrics for dashboard + `/metrics`.
-- [ ] Add deterministic tests proving live order path is never called in shadow mode.
+- [x] Add deterministic tests proving live order path is never called in shadow mode.
 
 **Migration / backward compatibility notes:**
 - No destructive schema change expected.
@@ -235,6 +235,81 @@ Also include migration notes, security sign-off, and validation command outputs 
 - Clear, actionable failure reasons for operators.
 
 ---
+
+
+## Priority 4 — Next-Generation Capability Tracks
+
+The detailed cross-agent backlog for next-generation bot capabilities now lives in `docs/next_generation_feature_matrix.md`. Keep statuses and implementation sequencing in parity between that matrix and this roadmap before release decisions.
+
+### 7) Portfolio risk-budget tripwires
+**Outcome:** Deterministic account-level kill-switches for daily loss, drawdown, and concentration caps.
+
+**Tracking**
+- Status: `not_started`
+- Owner: `Core Trading Engine Agent`
+- Target milestone: `v2.1.0`
+- PR link(s): _TBD_
+- Last updated: `2026-03-17`
+
+### 8) Shadow-live forensic snapshot persistence
+**Outcome:** Persist decision-time market context and guarantee no live-order POST path in shadow mode.
+
+**Tracking**
+- Status: `not_started`
+- Owner: `Core Trading Engine Agent` + `Data & Analytics Agent`
+- Target milestone: `v2.1.0`
+- PR link(s): _TBD_
+- Last updated: `2026-03-17`
+
+### 9) Walk-forward robustness and stability scoring
+**Outcome:** Out-of-sample robustness metrics exposed in backtest UI and exports.
+
+**Tracking**
+- Status: `not_started`
+- Owner: `Core Trading Engine Agent` + `Data & Analytics Agent`
+- Target milestone: `v2.1.1`
+- PR link(s): _TBD_
+- Last updated: `2026-03-17`
+
+### 10) Incident replay timeline
+**Outcome:** Deterministic event replay for post-incident root-cause analysis.
+
+**Tracking**
+- Status: `not_started`
+- Owner: `Data & Analytics Agent` + `Frontend & UX Agent`
+- Target milestone: `v2.1.1`
+- PR link(s): _TBD_
+- Last updated: `2026-03-17`
+
+### 11) Pre-live readiness gate
+**Outcome:** Hard block unsafe transitions from paper/shadow to live mode until required checks pass.
+
+**Tracking**
+- Status: `not_started`
+- Owner: `Security & Infrastructure Agent` + `Frontend & UX Agent`
+- Target milestone: `v2.1.2`
+- PR link(s): _TBD_
+- Last updated: `2026-03-17`
+
+### 12) Multi-venue execution failover
+**Outcome:** Pluggable execution venues with deterministic failover policy and tests.
+
+**Tracking**
+- Status: `not_started`
+- Owner: `Core Trading Engine Agent`
+- Target milestone: `v2.2.0`
+- PR link(s): _TBD_
+- Last updated: `2026-03-17`
+
+### 13) High-risk deterministic QA expansion
+**Outcome:** Broader regression coverage for execution/risk paths and reproducible fixtures.
+
+**Tracking**
+- Status: `not_started`
+- Owner: `QA & Testing Agent`
+- Target milestone: `v2.1.0`
+- PR link(s): _TBD_
+- Last updated: `2026-03-17`
 
 ## Validation matrix (required before marking a feature `done`)
 
